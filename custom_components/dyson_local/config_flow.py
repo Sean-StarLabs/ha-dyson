@@ -171,6 +171,22 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._device_info = None
 
+    async def _async_safe_reload(self, entry_id: str) -> None:
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if not entry:
+            return
+        if entry.state != config_entries.ConfigEntryState.LOADED:
+            return
+        await self.hass.config_entries.async_reload(entry_id)
+
+    async def _async_safe_setup(self, entry_id: str) -> None:
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if not entry:
+            return
+        if entry.state != config_entries.ConfigEntryState.NOT_LOADED:
+            return
+        await self.hass.config_entries.async_setup(entry_id)
+
     async def async_step_user(self, info: Optional[dict] = None):
         """Handle step initialized by user."""
         if info is not None:
@@ -520,9 +536,9 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Kick HA to apply changes, without tripping OperationNotAllowed.
                 # In particular, HA disallows async_setup unless the entry is NOT_LOADED.
                 if entry.state == config_entries.ConfigEntryState.LOADED:
-                    self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                    self.hass.async_create_task(self._async_safe_reload(entry.entry_id))
                 elif entry.state == config_entries.ConfigEntryState.NOT_LOADED:
-                    self.hass.async_create_task(self.hass.config_entries.async_setup(entry.entry_id))
+                    self.hass.async_create_task(self._async_safe_setup(entry.entry_id))
                 else:
                     # SETUP_RETRY / SETUP_ERROR / SETUP_IN_PROGRESS: let HA handle retries.
                     _LOGGER.debug(
