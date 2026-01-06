@@ -137,13 +137,22 @@ class DysonCloudClient:
                     mqtt_root_topic_level = _as_str(mqtt.get("mqttRootTopicLevel"))
                     if not mqtt_root_topic_level:
                         # Fallback: some accounts/devices appear to omit mqttRootTopicLevel.
-                        # Best-effort: use the manifest "type" and optional variant.
-                        base = _as_str(raw.get("type"))
-                        variant = raw.get("variant")
-                        if isinstance(variant, str) and variant.strip():
-                            mqtt_root_topic_level = f"{base}{variant.strip().upper()}"
+                        # Best-effort:
+                        # - Robot vacuums use RBxx as the MQTT root topic.
+                        # - Air devices use type (+variant) as the MQTT root topic.
+                        category = _as_str(raw.get("category"))
+                        model = _as_str(raw.get("model"))
+                        if category == "robot" and model:
+                            mqtt_root_topic_level = model.split("-", 1)[0]
                         else:
-                            mqtt_root_topic_level = base
+                            base = _as_str(raw.get("type"))
+                            variant = raw.get("variant")
+                            if isinstance(variant, str) and variant.strip():
+                                mqtt_root_topic_level = (
+                                    f"{base}{variant.strip().upper()}"
+                                )
+                            else:
+                                mqtt_root_topic_level = base
 
                     connected_cfg = DysonManifestConnectedConfiguration(
                         mqtt=DysonManifestMqtt(
