@@ -79,6 +79,14 @@ async def async_setup_account(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("Unexpected error retrieving devices: %s", str(err))
         raise ConfigEntryNotReady
 
+    # Store account data immediately so device entries can resolve the account even if they
+    # are set up concurrently during startup.
+    hass.data[DOMAIN][entry.entry_id] = {
+        DATA_ACCOUNT: entry.data[CONF_AUTH],
+        DATA_DEVICES: devices,
+        "china": entry.data[CONF_REGION] == "CN",
+    }
+
     _LOGGER.debug("Starting device discovery flows for %d devices", len(devices))
     for device in devices:
         mqtt_root_topic = device.mqtt_root_topic
@@ -127,11 +135,6 @@ async def async_setup_account(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         )
 
-    hass.data[DOMAIN][entry.entry_id] = {
-        DATA_ACCOUNT: entry.data[CONF_AUTH],
-        DATA_DEVICES: devices,
-        "china": entry.data[CONF_REGION] == "CN",
-    }
     return True
 
 
@@ -164,6 +167,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model=str(entry.data.get(CONF_MODEL) or ""),
         product_name=str(entry.data.get(CONF_PRODUCT_NAME) or ""),
         type=str(entry.data.get(CONF_TYPE) or ""),
+    )
+
+    _LOGGER.warning(
+        "Setting up Dyson device entry_id=%s serial=%s category=%s model=%s type=%s mqtt=%s",
+        entry.entry_id,
+        info.serial,
+        info.category,
+        info.model,
+        info.type,
+        info.mqtt_root_topic,
     )
 
     device = create_cloud_device(hass, info=info, cloud=cloud)
