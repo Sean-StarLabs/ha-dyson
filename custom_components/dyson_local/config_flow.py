@@ -488,7 +488,13 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         for entry in self._async_current_entries():
             if entry.unique_id == serial:
                 # Device already exists; update entry data to cloud-only format.
-                _LOGGER.debug("Device %s already configured, updating entry", serial)
+                _LOGGER.debug(
+                    "Device %s already configured, updating entry (entry_id=%s state=%s disabled_by=%s)",
+                    serial,
+                    entry.entry_id,
+                    entry.state,
+                    getattr(entry, "disabled_by", None),
+                )
                 new_data = {
                     **entry.data,
                     CONF_SERIAL: serial,
@@ -500,7 +506,16 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_MODEL: info.get("model"),
                     CONF_TYPE: info.get("type"),
                 }
-                self.hass.config_entries.async_update_entry(entry, data=new_data, title=name)
+                update_kwargs = {"data": new_data, "title": name}
+                # If the entry exists but is disabled, re-enable it so it can be set up.
+                if getattr(entry, "disabled_by", None) is not None:
+                    update_kwargs["disabled_by"] = None
+                try:
+                    self.hass.config_entries.async_update_entry(entry, **update_kwargs)
+                except TypeError:
+                    # Older HA versions may not accept disabled_by here.
+                    update_kwargs.pop("disabled_by", None)
+                    self.hass.config_entries.async_update_entry(entry, **update_kwargs)
                 # Ensure the updated entry is actually active.
                 # - If loaded, reload to pick up new cloud-only data.
                 # - If not loaded, attempt setup so the device appears without manual intervention.
