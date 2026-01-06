@@ -1,6 +1,7 @@
 """Config flow for Dyson integration."""
 
 import logging
+import asyncio
 import threading
 from typing import Optional
 
@@ -516,16 +517,19 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # Older HA versions may not accept disabled_by here.
                     update_kwargs.pop("disabled_by", None)
                     self.hass.config_entries.async_update_entry(entry, **update_kwargs)
-                # Ensure the updated entry is actually active.
-                # - If loaded, reload to pick up new cloud-only data.
-                # - If not loaded, attempt setup so the device appears without manual intervention.
+                # Kick HA to apply changes, without tripping OperationNotAllowed.
+                # In particular, HA disallows async_setup unless the entry is NOT_LOADED.
                 if entry.state == config_entries.ConfigEntryState.LOADED:
-                    self.hass.async_create_task(
-                        self.hass.config_entries.async_reload(entry.entry_id)
-                    )
+                    self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                elif entry.state == config_entries.ConfigEntryState.NOT_LOADED:
+                    self.hass.async_create_task(self.hass.config_entries.async_setup(entry.entry_id))
                 else:
-                    self.hass.async_create_task(
-                        self.hass.config_entries.async_setup(entry.entry_id)
+                    # SETUP_RETRY / SETUP_ERROR / SETUP_IN_PROGRESS: let HA handle retries.
+                    _LOGGER.debug(
+                        "Not forcing setup for %s (entry_id=%s) because state=%s",
+                        serial,
+                        entry.entry_id,
+                        entry.state,
                     )
                 return self.async_abort(reason="already_configured")
 
