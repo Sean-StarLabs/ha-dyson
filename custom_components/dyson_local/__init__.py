@@ -90,6 +90,16 @@ async def async_setup_account(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             continue
 
+        _LOGGER.info(
+            "MyDyson device: %s serial=%s category=%s model=%s type=%s mqtt=%s",
+            device.name,
+            device.serial_number,
+            device.category,
+            device.model,
+            device.type,
+            mqtt_root_topic,
+        )
+
         _LOGGER.debug(
             "Creating discovery flow for device: %s (category=%s, type=%s, model=%s, mqtt=%s)",
             device.name,

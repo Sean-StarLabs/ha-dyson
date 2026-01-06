@@ -23,11 +23,13 @@ async def async_setup_entry(
     """Set up Dyson binary sensor from a config entry."""
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
-    entities = [
-        DysonVacuumBatteryChargingSensor(device, name),
-        Dyson360HeuristBinFullSensor(device, name),
-        DysonPureHotCoolLinkTiltSensor(device, name),
-    ]
+    entities = []
+    if hasattr(device, "is_charging"):
+        entities.append(DysonVacuumBatteryChargingSensor(device, name))
+    if hasattr(device, "is_bin_full"):
+        entities.append(Dyson360HeuristBinFullSensor(device, name))
+    if hasattr(device, "tilt"):
+        entities.append(DysonPureHotCoolLinkTiltSensor(device, name))
     async_add_entities(entities)
 
 
