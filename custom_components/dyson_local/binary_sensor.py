@@ -2,13 +2,6 @@
 
 from typing import Callable
 
-from libdyson import (
-    Dyson360Eye,
-    Dyson360Heurist,
-    Dyson360VisNav,
-    DysonPureHotCoolLink,
-)
-
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
@@ -30,25 +23,11 @@ async def async_setup_entry(
     """Set up Dyson binary sensor from a config entry."""
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
-    entities = []
-    if isinstance(device, Dyson360Eye):
-        entities.append(DysonVacuumBatteryChargingSensor(device, name))
-    if isinstance(device, Dyson360Heurist):
-        entities.extend(
-            [
-                DysonVacuumBatteryChargingSensor(device, name),
-                Dyson360VisNavBinFullSensor(device, name),
-            ]
-        )
-    if isinstance(device, Dyson360VisNav):
-        entities.extend(
-            [
-                DysonVacuumBatteryChargingSensor(device, name),
-                Dyson360HeuristBinFullSensor(device, name),
-            ]
-        )
-    if isinstance(device, DysonPureHotCoolLink):
-        entities.extend([DysonPureHotCoolLinkTiltSensor(device, name)])
+    entities = [
+        DysonVacuumBatteryChargingSensor(device, name),
+        Dyson360HeuristBinFullSensor(device, name),
+        DysonPureHotCoolLinkTiltSensor(device, name),
+    ]
     async_add_entities(entities)
 
 
@@ -60,7 +39,7 @@ class DysonVacuumBatteryChargingSensor(DysonEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         """Return if the sensor is on."""
-        return self._device.is_charging
+        return bool(getattr(self._device, "is_charging", False))
 
     @property
     def device_class(self) -> str:
@@ -86,7 +65,7 @@ class Dyson360HeuristBinFullSensor(DysonEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         """Return if the sensor is on."""
-        return self._device.is_bin_full
+        return bool(getattr(self._device, "is_bin_full", False))
 
     @property
     def icon(self) -> str:
@@ -112,7 +91,7 @@ class Dyson360VisNavBinFullSensor(DysonEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         """Return if the sensor is on."""
-        return self._device.is_bin_full
+        return bool(getattr(self._device, "is_bin_full", False))
 
     @property
     def icon(self) -> str:
@@ -139,7 +118,7 @@ class DysonPureHotCoolLinkTiltSensor(DysonEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         """Return if the sensor is on."""
-        return self._device.tilt
+        return bool(getattr(self._device, "tilt", False))
 
     @property
     def sub_name(self) -> str:

@@ -4,7 +4,7 @@ import logging
 import math
 from typing import Any, Callable, List, Mapping, Optional
 
-from libdyson import DysonPureCool, DysonPureCoolLink, MessageType
+from libdyson import MessageType
 import voluptuous as vol
 
 from homeassistant.components.fan import (
@@ -67,22 +67,14 @@ async def async_setup_entry(
     """Set up Dyson fan from a config entry."""
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
-    if isinstance(device, DysonPureCoolLink):
-        entity = DysonPureCoolLinkEntity(device, name)
-    elif isinstance(device, DysonPureCool):
-        entity = DysonPureCoolEntity(device, name)
-    else:  # DysonPurifierHumidifyCool
-        entity = DysonPurifierHumidifyCoolEntity(device, name)
-    async_add_entities([entity])
+    # Cloud-backed devices are duck-typed; expose the richest fan entity.
+    async_add_entities([DysonPureCoolEntity(device, name)])
 
     platform = entity_platform.current_platform.get()
     platform.async_register_entity_service(
         SERVICE_SET_TIMER, SET_TIMER_SCHEMA, "set_timer"
     )
-    if isinstance(device, DysonPureCool):
-        platform.async_register_entity_service(
-            SERVICE_SET_ANGLE, SET_ANGLE_SCHEMA, "set_angle"
-        )
+    platform.async_register_entity_service(SERVICE_SET_ANGLE, SET_ANGLE_SCHEMA, "set_angle")
 
 
 class DysonFanEntity(DysonEntity, FanEntity):

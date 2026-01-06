@@ -2,8 +2,6 @@
 
 from typing import Callable
 
-from libdyson import DysonPureHotCoolLink
-
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
@@ -23,9 +21,8 @@ async def async_setup_entry(
     entities = [
         DysonNightModeSwitchEntity(device, name),
         DysonContinuousMonitoringSwitchEntity(device, name),
+        DysonFocusModeSwitchEntity(device, name),
     ]
-    if isinstance(device, DysonPureHotCoolLink):
-        entities.append(DysonFocusModeSwitchEntity(device, name))
     async_add_entities(entities)
 
 

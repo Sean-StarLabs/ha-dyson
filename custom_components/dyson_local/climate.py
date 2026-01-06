@@ -5,8 +5,6 @@ from typing import List, Optional
 
 from .const import DATA_DEVICES, DOMAIN
 from .utils import environmental_property
-from libdyson import DysonPureHotCoolLink
-
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
     HVACAction,
@@ -36,11 +34,9 @@ async def async_setup_entry(
     """Set up Dyson climate from a config entry."""
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
-    if isinstance(device, DysonPureHotCoolLink):
-        entity = DysonPureHotCoolLinkEntity(device, name)
-    else:  # DysonPureHotCool
-        entity = DysonPureHotCoolEntity(device, name)
-    async_add_entities([entity])
+    if not hasattr(device, "set_heat_target"):
+        return
+    async_add_entities([DysonPureHotCoolLinkEntity(device, name)])
 
 
 class DysonClimateEntity(DysonEntity, ClimateEntity):

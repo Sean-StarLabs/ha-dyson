@@ -28,6 +28,8 @@ async def async_setup_entry(
     """Set up Dyson humidifier from a config entry."""
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
+    if not hasattr(device, "humidification"):
+        return
     async_add_entities([DysonHumidifierEntity(device, name)])
 
 

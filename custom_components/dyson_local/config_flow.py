@@ -48,7 +48,18 @@ from homeassistant.components.zeroconf import async_get_instance
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_EMAIL, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import CONF_CREDENTIAL, CONF_DEVICE_TYPE, CONF_SERIAL, DOMAIN
+from .const import (
+    CONF_ACCOUNT_ENTRY_ID,
+    CONF_CATEGORY,
+    CONF_CREDENTIAL,
+    CONF_DEVICE_TYPE,
+    CONF_MODEL,
+    CONF_MQTT_ROOT_TOPIC,
+    CONF_PRODUCT_NAME,
+    CONF_SERIAL,
+    CONF_TYPE,
+    DOMAIN,
+)
 
 from .cloud.const import CONF_REGION, CONF_AUTH
 
@@ -62,9 +73,7 @@ CONF_MOBILE = "mobile"
 CONF_OTP = "otp"
 
 SETUP_METHODS = {
-    "wifi": "Setup using your device's Wi-Fi sticker",
-    "cloud": "Setup automatically with your MyDyson Account",
-    "manual": "Setup manually",
+    "cloud": "Setup with your MyDyson Account (cloud-only)",
 }
 
 
@@ -153,7 +162,9 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Dyson local config flow."""
 
     VERSION = 1
-    CONNECTION_CLASS = config_entries.CONN_CLASS_LOCAL_PUSH
+    CONNECTION_CLASS = getattr(
+        config_entries, "CONN_CLASS_CLOUD_PUSH", config_entries.CONN_CLASS_LOCAL_PUSH
+    )
 
     def __init__(self):
         """Initialize the config flow."""
@@ -162,11 +173,7 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, info: Optional[dict] = None):
         """Handle step initialized by user."""
         if info is not None:
-            if info[CONF_METHOD] == "wifi":
-                return await self.async_step_wifi()
-            if info[CONF_METHOD] == "cloud":
-                return await self.async_step_cloud()
-            return await self.async_step_manual()
+            return await self.async_step_cloud()
 
         return self.async_show_form(
             step_id="user",
@@ -459,25 +466,46 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_discovery(self, info: DysonDeviceInfo):
-        """Handle step initialized by MyDyson discovery."""
-        _LOGGER.debug("Starting discovery step for device: %s (ProductType: %s)", 
-                     info.name, info.product_type)
-        
+    async def async_step_discovery(self, info: dict):
+        """Handle step initialized by MyDyson discovery (cloud-only)."""
+
+        serial = info.get("serial_number")
+        name = info.get("name")
+        mqtt_root_topic = info.get("mqtt_root_topic")
+        account_entry_id = info.get("account_entry_id")
+
+        if not all(isinstance(v, str) and v for v in (serial, name, mqtt_root_topic, account_entry_id)):
+            _LOGGER.error("Invalid discovery data from MyDyson: %s", info)
+            return self.async_abort(reason="cannot_connect_cloud")
+
+        _LOGGER.debug(
+            "Starting discovery step for device: %s (serial=%s, mqtt=%s)",
+            name,
+            serial,
+            mqtt_root_topic,
+        )
+
         for entry in self._async_current_entries():
-            if entry.unique_id == info.serial:
-                _LOGGER.debug("Device %s already configured, aborting", info.serial)
+            if entry.unique_id == serial:
+                _LOGGER.debug("Device %s already configured, aborting", serial)
                 return self.async_abort(reason="already_configured")
-        
-        await self.async_set_unique_id(info.serial)
+
+        await self.async_set_unique_id(serial)
         self._abort_if_unique_id_configured()
-        self.context["title_placeholders"] = {
-            CONF_NAME: info.name,
-            CONF_SERIAL: info.serial,
-        }
-        self._device_info = info
-        _LOGGER.debug("Device %s passed initial checks, proceeding to host step", info.serial)
-        return await self.async_step_host()
+
+        return self.async_create_entry(
+            title=name,
+            data={
+                CONF_SERIAL: serial,
+                CONF_NAME: name,
+                CONF_ACCOUNT_ENTRY_ID: account_entry_id,
+                CONF_MQTT_ROOT_TOPIC: mqtt_root_topic,
+                CONF_CATEGORY: info.get("category"),
+                CONF_PRODUCT_NAME: info.get("product_name"),
+                CONF_MODEL: info.get("model"),
+                CONF_TYPE: info.get("type"),
+            },
+        )
 
     async def _async_get_entry_data(
         self,
