@@ -181,6 +181,13 @@ class DysonCloudClient:
                             else:
                                 mqtt_root_topic_level = base
 
+                    # Robot vacuums use RBxx MQTT roots (e.g. RB03, RB05). Some manifests
+                    # report a numeric product type (e.g. "277") here; prefer RBxx.
+                    category = _as_str(raw.get("category"))
+                    model = _as_str(raw.get("model"))
+                    if category == "robot" and model.startswith("RB"):
+                        mqtt_root_topic_level = model.split("-", 1)[0]
+
                     connected_cfg = DysonManifestConnectedConfiguration(
                         mqtt=DysonManifestMqtt(
                             local_broker_credentials=_as_str(

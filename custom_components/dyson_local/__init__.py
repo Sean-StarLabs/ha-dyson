@@ -6,6 +6,7 @@ connect to devices via local-network MQTT brokers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional, Protocol
 
@@ -149,7 +150,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not isinstance(account_entry_id, str) or not account_entry_id:
         raise ConfigEntryNotReady("Missing account reference for Dyson device")
 
+    # Device entries and account entries can be set up concurrently during HA startup.
+    # Wait briefly for the account entry to populate hass.data to avoid SETUP_RETRY loops.
     account_data = hass.data[DOMAIN].get(account_entry_id)
+    if not account_data:
+        for _ in range(20):
+            await asyncio.sleep(0.25)
+            account_data = hass.data[DOMAIN].get(account_entry_id)
+            if account_data:
+                break
     if not account_data:
         raise ConfigEntryNotReady("Referenced Dyson account is not loaded")
 
