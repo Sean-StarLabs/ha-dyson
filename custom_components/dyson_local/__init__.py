@@ -90,7 +90,8 @@ async def async_setup_account(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             continue
 
-        _LOGGER.info(
+        # Use WARNING so it shows up in default HA logs.
+        _LOGGER.warning(
             "MyDyson device: %s serial=%s category=%s model=%s type=%s mqtt=%s",
             device.name,
             device.serial_number,

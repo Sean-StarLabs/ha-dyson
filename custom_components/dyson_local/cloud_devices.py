@@ -116,7 +116,8 @@ class DysonCloudDevice:
     async def async_start(self) -> None:
         creds = await self._cloud.async_get_iot_credentials(self._info.serial)
         self._mqtt = DysonAwsIotMqtt(self._hass, creds=creds, on_message=self._on_message)
-        self._mqtt.start()
+        # paho-mqtt TLS setup loads system certs and can block; run in executor.
+        await self._hass.async_add_executor_job(self._mqtt.start)
         self._subscribe()
         self._request_initial_state()
 
