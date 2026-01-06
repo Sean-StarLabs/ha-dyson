@@ -501,9 +501,17 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_TYPE: info.get("type"),
                 }
                 self.hass.config_entries.async_update_entry(entry, data=new_data, title=name)
-                # Reload if already loaded (best-effort).
+                # Ensure the updated entry is actually active.
+                # - If loaded, reload to pick up new cloud-only data.
+                # - If not loaded, attempt setup so the device appears without manual intervention.
                 if entry.state == config_entries.ConfigEntryState.LOADED:
-                    self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                    self.hass.async_create_task(
+                        self.hass.config_entries.async_reload(entry.entry_id)
+                    )
+                else:
+                    self.hass.async_create_task(
+                        self.hass.config_entries.async_setup(entry.entry_id)
+                    )
                 return self.async_abort(reason="already_configured")
 
         await self.async_set_unique_id(serial)
