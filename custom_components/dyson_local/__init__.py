@@ -37,7 +37,7 @@ from .cloud_devices import DysonDeviceInfo, create_cloud_device
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS_ROBOT = ["binary_sensor", "sensor", "vacuum"]
+PLATFORMS_ROBOT = ["binary_sensor", "sensor", "vacuum", "select", "button"]
 PLATFORMS_AIR = ["fan", "select", "sensor", "switch", "button", "climate", "humidifier"]
 
 

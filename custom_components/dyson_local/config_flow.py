@@ -487,7 +487,23 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         for entry in self._async_current_entries():
             if entry.unique_id == serial:
-                _LOGGER.debug("Device %s already configured, aborting", serial)
+                # Device already exists; update entry data to cloud-only format.
+                _LOGGER.debug("Device %s already configured, updating entry", serial)
+                new_data = {
+                    **entry.data,
+                    CONF_SERIAL: serial,
+                    CONF_NAME: name,
+                    CONF_ACCOUNT_ENTRY_ID: account_entry_id,
+                    CONF_MQTT_ROOT_TOPIC: mqtt_root_topic,
+                    CONF_CATEGORY: info.get("category"),
+                    CONF_PRODUCT_NAME: info.get("product_name"),
+                    CONF_MODEL: info.get("model"),
+                    CONF_TYPE: info.get("type"),
+                }
+                self.hass.config_entries.async_update_entry(entry, data=new_data, title=name)
+                # Reload if already loaded (best-effort).
+                if entry.state == config_entries.ConfigEntryState.LOADED:
+                    self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                 return self.async_abort(reason="already_configured")
 
         await self.async_set_unique_id(serial)

@@ -115,8 +115,3 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
 
     def return_to_base(self, **kwargs) -> None:
         self._device.abort()
-        return list(VIS_NAV_POWER_MODE_STR_TO_ENUM.keys())
-
-    def set_fan_speed(self, fan_speed: str, **kwargs) -> None:
-        """Set fan speed."""
-        self._device.set_default_power_mode(VIS_NAV_POWER_MODE_STR_TO_ENUM[fan_speed])

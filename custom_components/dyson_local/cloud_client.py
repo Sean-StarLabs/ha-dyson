@@ -40,6 +40,23 @@ class DysonIoTCredentialsResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class DysonPersistentMapZone:
+    id: str
+    name: str
+    area: Optional[float]
+    icon: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class DysonPersistentMapMetadata:
+    id: str
+    name: Optional[str]
+    last_visited: Optional[str]
+    zones_definition_last_updated_date: Optional[str]
+    zones: list[DysonPersistentMapZone]
+
+
+@dataclass(frozen=True, slots=True)
 class DysonManifestMqtt:
     local_broker_credentials: str
     mqtt_root_topic_level: str
@@ -71,6 +88,16 @@ class DysonManifestDevice:
 
 def _as_str(value: Any, *, default: str = "") -> str:
     return value if isinstance(value, str) else default
+
+
+def _as_optional_str(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) else None
+
+
+def _as_optional_float(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
 
 def extract_bearer_token(auth_info: Any) -> str:
@@ -212,3 +239,57 @@ class DysonCloudClient:
             token_value=_as_str(iot.get("TokenValue")),
         )
         return DysonIoTCredentialsResponse(endpoint=endpoint, iot_credentials=creds)
+
+    async def async_get_persistent_map_metadata(
+        self, serial_number: str
+    ) -> list[DysonPersistentMapMetadata]:
+        """Return persistent map metadata for Dyson robot vacuums (e.g. RB03 Vis Nav)."""
+
+        url = f"{self._base_url}/v1/app/{serial_number}/persistent-map-metadata"
+        async with self._session.get(url, headers=self._headers()) as resp:
+            resp.raise_for_status()
+            payload = await resp.json(content_type=None)
+
+        if not isinstance(payload, list):
+            raise ValueError("Unexpected Dyson persistent map metadata response (expected list)")
+
+        maps: list[DysonPersistentMapMetadata] = []
+        for raw_map in payload:
+            if not isinstance(raw_map, dict):
+                continue
+
+            zones_raw = raw_map.get("zones")
+            zones: list[DysonPersistentMapZone] = []
+            if isinstance(zones_raw, list):
+                for raw_zone in zones_raw:
+                    if not isinstance(raw_zone, dict):
+                        continue
+                    zone_id = _as_str(raw_zone.get("id"))
+                    if not zone_id:
+                        continue
+                    zones.append(
+                        DysonPersistentMapZone(
+                            id=zone_id,
+                            name=_as_str(raw_zone.get("name")) or zone_id,
+                            area=_as_optional_float(raw_zone.get("area")),
+                            icon=_as_optional_str(raw_zone.get("icon")),
+                        )
+                    )
+
+            map_id = _as_str(raw_map.get("id"))
+            if not map_id:
+                continue
+
+            maps.append(
+                DysonPersistentMapMetadata(
+                    id=map_id,
+                    name=_as_optional_str(raw_map.get("name")),
+                    last_visited=_as_optional_str(raw_map.get("lastVisited")),
+                    zones_definition_last_updated_date=_as_optional_str(
+                        raw_map.get("zonesDefinitionLastUpdatedDate")
+                    ),
+                    zones=zones,
+                )
+            )
+
+        return maps

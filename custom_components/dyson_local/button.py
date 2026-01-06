@@ -29,6 +29,9 @@ async def async_setup_entry(
     if hasattr(device, "filter_life"):
         entities.append(DysonFilterResetButton(device, name))
 
+    if callable(getattr(device, "clean_selected_zone", None)):
+        entities.append(DysonRobotCleanAreaButton(device, name))
+
     async_add_entities(entities)
 
 
@@ -47,3 +50,20 @@ class DysonFilterResetButton(DysonEntity, ButtonEntity):
 
     def press(self) -> None:
         self._device.reset_filter()
+
+
+class DysonRobotCleanAreaButton(DysonEntity, ButtonEntity):
+    """Trigger a zone clean using the currently selected area."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    @property
+    def sub_name(self) -> Optional[str]:
+        return "Clean Area"
+
+    @property
+    def sub_unique_id(self) -> str:
+        return "clean-area"
+
+    def press(self) -> None:
+        self._device.clean_selected_zone()

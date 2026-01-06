@@ -12,12 +12,18 @@ import json
 import logging
 from typing import Any, Callable, Optional
 
+from aiohttp import ClientResponseError
+
 from homeassistant.core import HomeAssistant
 
 from libdyson import MessageType
 
 from .aws_iot_mqtt import DysonAwsIotMqtt
-from .cloud_client import DysonCloudClient, DysonIoTCredentialsResponse
+from .cloud_client import (
+    DysonCloudClient,
+    DysonIoTCredentialsResponse,
+    DysonPersistentMapMetadata,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,6 +153,65 @@ class DysonCloudRobot(DysonCloudDevice):
     def __init__(self, hass: HomeAssistant, *, info: DysonDeviceInfo, cloud: DysonCloudClient) -> None:
         super().__init__(hass, info=info, cloud=cloud)
         self._status: dict[str, Any] = {}
+        self._maps: list[DysonPersistentMapMetadata] = []
+        self._selected_map_id: Optional[str] = None
+        self._selected_zone_id: Optional[str] = None
+
+    async def async_start(self) -> None:
+        await super().async_start()
+        self._hass.async_create_task(self.async_refresh_maps())
+
+    async def async_refresh_maps(self) -> None:
+        """Fetch persistent map metadata to enable zone/area controls in HA."""
+        try:
+            maps = await self._cloud.async_get_persistent_map_metadata(self._info.serial)
+        except ClientResponseError as err:
+            # Not all robot models support these endpoints.
+            if err.status in (400, 401, 403, 404):
+                _LOGGER.debug(
+                    "Robot %s persistent map metadata not available (%s)",
+                    self._info.serial,
+                    err.status,
+                )
+                return
+            _LOGGER.warning(
+                "Robot %s persistent map metadata request failed: %s",
+                self._info.serial,
+                err,
+            )
+            return
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Robot %s persistent map metadata request failed: %s",
+                self._info.serial,
+                err,
+            )
+            return
+
+        self._maps = maps
+
+        current_map_id = str(self._status.get("persistentMapId") or "")
+        if current_map_id and any(m.id == current_map_id for m in maps):
+            self._selected_map_id = current_map_id
+        elif maps:
+            self._selected_map_id = maps[0].id
+        else:
+            self._selected_map_id = None
+            self._selected_zone_id = None
+
+        if self._selected_map_id and not self._selected_zone_id:
+            zones = self._zones_for_map(self._selected_map_id)
+            if zones:
+                self._selected_zone_id = zones[0].id
+
+        _LOGGER.debug(
+            "Robot %s loaded %d persistent maps (selected_map=%s selected_zone=%s)",
+            self._info.serial,
+            len(self._maps),
+            self._selected_map_id,
+            self._selected_zone_id,
+        )
+        self._emit(MessageType.STATE)
 
     def _subscribe(self) -> None:
         assert self._mqtt
@@ -195,6 +260,89 @@ class DysonCloudRobot(DysonCloudDevice):
                 "msg": "STATE-SET",
                 "mode-reason": "LAPP",
                 "defaults": {"defaultCleaningStrategy": strategy},
+            }
+        )
+
+    def _map_display_name(self, m: DysonPersistentMapMetadata) -> str:
+        return m.name or m.id
+
+    def _zones_for_map(self, map_id: str) -> list[Any]:
+        for m in self._maps:
+            if m.id == map_id:
+                return list(m.zones)
+        return []
+
+    @property
+    def maps(self) -> list[tuple[str, str]]:
+        """Available persistent maps as (id, display_name)."""
+        return [(m.id, self._map_display_name(m)) for m in self._maps]
+
+    @property
+    def selected_map_id(self) -> Optional[str]:
+        return self._selected_map_id
+
+    def select_map(self, map_id: str) -> None:
+        if map_id == self._selected_map_id:
+            return
+        if not any(m.id == map_id for m in self._maps):
+            raise ValueError(f"Unknown map id: {map_id}")
+        self._selected_map_id = map_id
+        zones = self._zones_for_map(map_id)
+        self._selected_zone_id = zones[0].id if zones else None
+        self._emit(MessageType.STATE)
+
+    @property
+    def zones(self) -> list[tuple[str, str]]:
+        """Available zones for the selected map as (id, name)."""
+        if not self._selected_map_id:
+            return []
+        zones = self._zones_for_map(self._selected_map_id)
+        return [(z.id, z.name) for z in zones]
+
+    @property
+    def selected_zone_id(self) -> Optional[str]:
+        return self._selected_zone_id
+
+    def select_zone(self, zone_id: str) -> None:
+        if zone_id == self._selected_zone_id:
+            return
+        if not self._selected_map_id:
+            raise ValueError("No map selected")
+        zones = self._zones_for_map(self._selected_map_id)
+        if not any(z.id == zone_id for z in zones):
+            raise ValueError(f"Unknown zone id: {zone_id}")
+        self._selected_zone_id = zone_id
+        self._emit(MessageType.STATE)
+
+    def clean_selected_zone(self) -> None:
+        """Start a zone clean for the currently selected map/zone."""
+        map_id = self._selected_map_id
+        zone_id = self._selected_zone_id
+        if not map_id or not zone_id:
+            _LOGGER.warning(
+                "Robot %s cannot start zone clean without a selected map/zone",
+                self._info.serial,
+            )
+            return
+
+        map_meta = next((m for m in self._maps if m.id == map_id), None)
+        if not map_meta:
+            _LOGGER.warning("Robot %s selected map %s not found", self._info.serial, map_id)
+            return
+
+        cleaning_programme = {
+            "orderedZones": [],
+            "persistentMapId": map_meta.id,
+            "unorderedZones": [zone_id],
+            "zonesDefinitionLastUpdatedDate": map_meta.zones_definition_last_updated_date,
+        }
+        self._publish(
+            {
+                "msg": "START",
+                "mode-reason": "LAPP",
+                "fullCleanType": "immediate",
+                "cleaningMode": "zoneConfigured",
+                "cleaningProgramme": cleaning_programme,
             }
         )
 
@@ -260,6 +408,10 @@ class DysonCloudRobot(DysonCloudDevice):
             msg.pop("msg", None)
             msg.pop("time", None)
             self._status.update(msg)
+            current_map_id = str(self._status.get("persistentMapId") or "")
+            if current_map_id and current_map_id != (self._selected_map_id or ""):
+                if any(m.id == current_map_id for m in self._maps):
+                    self._selected_map_id = current_map_id
             self._emit(MessageType.STATE)
 
 
