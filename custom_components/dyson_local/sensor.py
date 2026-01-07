@@ -1,5 +1,6 @@
 """Sensor platform for Dyson (cloud-only)."""
 
+from datetime import datetime
 from typing import Callable, Union, Optional
 
 from libdyson.const import MessageType
@@ -18,6 +19,7 @@ from homeassistant.const import (
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
+from homeassistant.util import dt as dt_util
 
 from . import DysonEntity, DysonDevice
 from .const import CONF_CATEGORY, DATA_DEVICES, DOMAIN
@@ -30,7 +32,13 @@ async def async_setup_entry(
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
     if config_entry.data.get(CONF_CATEGORY) == "robot":
-        entities = [DysonBatterySensor(device, name)]
+        entities = [
+            DysonBatterySensor(device, name),
+            DysonRobotCurrentAreaSensor(device, name),
+            DysonRobotSelectedAreasSensor(device, name),
+            DysonRobotSelectedDustEstimateSensor(device, name),
+            DysonRobotLastMessageTimeSensor(device, name),
+        ]
     else:
         entities = [
             DysonHumiditySensor(device, name),
@@ -107,6 +115,68 @@ class DysonBatterySensor(DysonSensor):
     def native_value(self) -> int:
         """Return the state of the sensor."""
         return int(getattr(self._device, "battery_level", 0))
+
+
+class DysonRobotCurrentAreaSensor(DysonSensor):
+    """Dyson robot current area name (best-effort)."""
+
+    _SENSOR_TYPE = "current_area"
+    _SENSOR_NAME = "Current Area"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> Optional[str]:
+        value = getattr(self._device, "current_zone_name", None)
+        return str(value) if isinstance(value, str) and value else None
+
+
+class DysonRobotSelectedAreasSensor(DysonSensor):
+    """Dyson robot selected areas list (multi-area selection)."""
+
+    _SENSOR_TYPE = "selected_areas"
+    _SENSOR_NAME = "Selected Areas"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> Optional[str]:
+        names = getattr(self._device, "selected_zone_names", None)
+        if not isinstance(names, list):
+            return None
+        cleaned = [str(v) for v in names if isinstance(v, str) and v]
+        return ", ".join(cleaned) if cleaned else None
+
+
+class DysonRobotSelectedDustEstimateSensor(DysonSensor):
+    """Estimated dust load for currently selected zones (Vis Nav)."""
+
+    _SENSOR_TYPE = "selected_dust_mg"
+    _SENSOR_NAME = "Selected Dust"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_native_unit_of_measurement = "mg"
+
+    @property
+    def native_value(self) -> Optional[float]:
+        value = getattr(self._device, "selected_zones_dust_mg", None)
+        return float(value) if isinstance(value, (int, float)) else None
+
+
+class DysonRobotLastMessageTimeSensor(DysonSensor):
+    """Timestamp of the last CURRENT-STATE message received."""
+
+    _SENSOR_TYPE = "last_message_time"
+    _SENSOR_NAME = "Last Update"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    @property
+    def native_value(self) -> Optional[datetime]:
+        raw = getattr(self._device, "last_message_time", None)
+        if not isinstance(raw, str) or not raw:
+            return None
+        dt = dt_util.parse_datetime(raw)
+        if dt is None:
+            return None
+        return dt_util.as_utc(dt)
 
 
 class DysonFilterLifeSensor(DysonSensor):

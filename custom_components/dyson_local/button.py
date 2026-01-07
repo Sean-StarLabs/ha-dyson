@@ -31,6 +31,12 @@ async def async_setup_entry(
 
     if callable(getattr(device, "clean_selected_zone", None)):
         entities.append(DysonRobotCleanAreaButton(device, name))
+    if callable(getattr(device, "add_selected_zone", None)):
+        entities.append(DysonRobotAddAreaButton(device, name))
+    if callable(getattr(device, "clear_selected_zones", None)):
+        entities.append(DysonRobotClearAreasButton(device, name))
+    if callable(getattr(device, "clean_selected_zones", None)):
+        entities.append(DysonRobotCleanAreasButton(device, name))
 
     async_add_entities(entities)
 
@@ -55,7 +61,7 @@ class DysonFilterResetButton(DysonEntity, ButtonEntity):
 class DysonRobotCleanAreaButton(DysonEntity, ButtonEntity):
     """Trigger a zone clean using the currently selected area."""
 
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_category = None
 
     @property
     def sub_name(self) -> Optional[str]:
@@ -67,3 +73,54 @@ class DysonRobotCleanAreaButton(DysonEntity, ButtonEntity):
 
     def press(self) -> None:
         self._device.clean_selected_zone()
+
+
+class DysonRobotAddAreaButton(DysonEntity, ButtonEntity):
+    """Add the current area to the multi-area selection list."""
+
+    _attr_entity_category = None
+
+    @property
+    def sub_name(self) -> Optional[str]:
+        return "Add Area"
+
+    @property
+    def sub_unique_id(self) -> str:
+        return "add-area"
+
+    def press(self) -> None:
+        self._device.add_selected_zone()
+
+
+class DysonRobotClearAreasButton(DysonEntity, ButtonEntity):
+    """Clear the multi-area selection list."""
+
+    _attr_entity_category = None
+
+    @property
+    def sub_name(self) -> Optional[str]:
+        return "Clear Areas"
+
+    @property
+    def sub_unique_id(self) -> str:
+        return "clear-areas"
+
+    def press(self) -> None:
+        self._device.clear_selected_zones()
+
+
+class DysonRobotCleanAreasButton(DysonEntity, ButtonEntity):
+    """Trigger a multi-zone clean using the selected areas list."""
+
+    _attr_entity_category = None
+
+    @property
+    def sub_name(self) -> Optional[str]:
+        return "Clean Areas"
+
+    @property
+    def sub_unique_id(self) -> str:
+        return "clean-areas"
+
+    def press(self) -> None:
+        self._device.clean_selected_zones()

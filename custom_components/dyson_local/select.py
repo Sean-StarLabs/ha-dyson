@@ -23,6 +23,15 @@ AIR_QUALITY_TARGET_STR_TO_ENUM = {
     value: key for key, value in AIR_QUALITY_TARGET_ENUM_TO_STR.items()
 }
 
+ROBOT_STRATEGY_ENUM_TO_STR = {
+    "auto": "Auto",
+    "quick": "Quick",
+    "quiet": "Quiet",
+    "boost": "Boost",
+}
+
+ROBOT_STRATEGY_STR_TO_ENUM = {v: k for k, v in ROBOT_STRATEGY_ENUM_TO_STR.items()}
+
 async def async_setup_entry(
     hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: Callable
 ) -> None:
@@ -32,6 +41,10 @@ async def async_setup_entry(
     entities = []
     if getattr(device, "air_quality_target", None) is not None:
         entities.append(DysonAirQualitySelect(device, name))
+    if callable(getattr(device, "set_default_cleaning_strategy", None)) and hasattr(
+        device, "current_power_mode"
+    ):
+        entities.append(DysonRobotCleaningLevelSelect(device, name))
     if callable(getattr(device, "clean_selected_zone", None)) and callable(
         getattr(device, "select_zone", None)
     ):
@@ -127,7 +140,8 @@ class DysonRobotMapSelect(DysonEntity, SelectEntity):
 class DysonRobotAreaSelect(DysonEntity, SelectEntity):
     """Select a zone/area for the current map (RB03/Vis Nav)."""
 
-    _attr_entity_category = EntityCategory.CONFIG
+    # This is an active control used for cleaning, not just configuration.
+    _attr_entity_category = None
 
     @property
     def options(self) -> list[str]:
@@ -166,3 +180,30 @@ class DysonRobotAreaSelect(DysonEntity, SelectEntity):
     @property
     def sub_unique_id(self) -> str:
         return "area"
+
+
+class DysonRobotCleaningLevelSelect(DysonEntity, SelectEntity):
+    """Select the default cleaning level/strategy for robot vacuums."""
+
+    _attr_entity_category = None
+    _attr_options = list(ROBOT_STRATEGY_STR_TO_ENUM.keys())
+
+    @property
+    def current_option(self) -> Optional[str]:
+        strategy = getattr(self._device, "current_power_mode", None)
+        if not isinstance(strategy, str) or not strategy:
+            return "Auto"
+        return ROBOT_STRATEGY_ENUM_TO_STR.get(strategy, "Auto")
+
+    def select_option(self, option: str) -> None:
+        strategy = ROBOT_STRATEGY_STR_TO_ENUM.get(option)
+        if strategy:
+            self._device.set_default_cleaning_strategy(strategy)
+
+    @property
+    def sub_name(self) -> str:
+        return "Cleaning Level"
+
+    @property
+    def sub_unique_id(self) -> str:
+        return "cleaning-level"

@@ -504,6 +504,18 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         for entry in self._async_current_entries():
             if entry.unique_id == serial:
+                # If the user previously chose "Ignore" for this device, HA will have created a
+                # special config entry with source=ignore which is intentionally *not* set up.
+                # We want cloud discovery to override that and create a real device entry.
+                if entry.source == config_entries.SOURCE_IGNORE:
+                    _LOGGER.warning(
+                        "Device %s was previously ignored; removing ignore entry %s to re-add",
+                        serial,
+                        entry.entry_id,
+                    )
+                    await self.hass.config_entries.async_remove(entry.entry_id)
+                    break
+
                 # Device already exists; update entry data to cloud-only format.
                 _LOGGER.debug(
                     "Device %s already configured, updating entry (entry_id=%s state=%s disabled_by=%s)",

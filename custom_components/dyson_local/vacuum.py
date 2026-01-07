@@ -4,15 +4,12 @@ from typing import Any, Callable, List, Mapping
 
 from homeassistant.components.vacuum import (
     ATTR_STATUS,
-    STATE_CLEANING,
-    STATE_DOCKED,
-    STATE_ERROR,
-    STATE_RETURNING,
+    VacuumActivity,
     VacuumEntityFeature,
     StateVacuumEntity,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, STATE_PAUSED
+from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 
 from . import DysonEntity
@@ -25,7 +22,6 @@ SUPPORTED_FEATURES = (
     | VacuumEntityFeature.FAN_SPEED
     | VacuumEntityFeature.STATUS
     | VacuumEntityFeature.STATE
-    | VacuumEntityFeature.BATTERY
 )
 
 FAN_SPEED_LIST = ["Auto", "Quick", "Quiet", "Boost"]
@@ -61,33 +57,37 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
         return SUPPORTED_FEATURES
 
     @property
-    def battery_level(self) -> int:
-        return int(getattr(self._device, "battery_level", 0))
-
-    @property
     def status(self) -> str:
         return str(getattr(self._device, "state", "UNKNOWN"))
 
     @property
-    def state(self) -> str:
+    def activity(self) -> VacuumActivity:
         raw = self.status.upper()
         if "FAULT" in raw:
-            return STATE_ERROR
+            return VacuumActivity.ERROR
         if "PAUSED" in raw:
-            return STATE_PAUSED
+            return VacuumActivity.PAUSED
         if "ABORT" in raw or "RETURN" in raw:
-            return STATE_RETURNING
+            return VacuumActivity.RETURNING
         if "RUN" in raw or "TRAVERS" in raw or "DISCOVER" in raw or "MAPPING" in raw:
-            return STATE_CLEANING
+            return VacuumActivity.CLEANING
         if "DOCK" in raw or "CHARG" in raw or "INACTIVE" in raw:
-            return STATE_DOCKED
-        return STATE_DOCKED
+            return VacuumActivity.DOCKED
+        return VacuumActivity.DOCKED
+
+    @property
+    def state(self) -> str:
+        # Backwards compatible state string for older HA consumers.
+        # Prefer `activity` in new HA versions.
+        return self.activity.value
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any]:
         return {
             ATTR_POSITION: str(getattr(self._device, "position", "")),
             ATTR_STATUS: self.status,
+            "current_area": getattr(self._device, "current_zone_name", None),
+            "selected_areas": getattr(self._device, "selected_zone_names", None),
         }
 
     @property
@@ -105,7 +105,7 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
             self._device.set_default_cleaning_strategy(strategy)
 
     def start(self) -> None:
-        if self.state == STATE_PAUSED:
+        if self.activity == VacuumActivity.PAUSED:
             self._device.resume()
         else:
             self._device.start()

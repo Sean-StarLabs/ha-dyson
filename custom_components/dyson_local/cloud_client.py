@@ -57,6 +57,12 @@ class DysonPersistentMapMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class DysonZoneDustPrediction:
+    zone_id: str
+    dust_milligrams: float
+
+
+@dataclass(frozen=True, slots=True)
 class DysonManifestMqtt:
     local_broker_credentials: str
     mqtt_root_topic_level: str
@@ -181,13 +187,6 @@ class DysonCloudClient:
                             else:
                                 mqtt_root_topic_level = base
 
-                    # Robot vacuums use RBxx MQTT roots (e.g. RB03, RB05). Some manifests
-                    # report a numeric product type (e.g. "277") here; prefer RBxx.
-                    category = _as_str(raw.get("category"))
-                    model = _as_str(raw.get("model"))
-                    if category == "robot" and model.startswith("RB"):
-                        mqtt_root_topic_level = model.split("-", 1)[0]
-
                     connected_cfg = DysonManifestConnectedConfiguration(
                         mqtt=DysonManifestMqtt(
                             local_broker_credentials=_as_str(
@@ -300,3 +299,53 @@ class DysonCloudClient:
             )
 
         return maps
+
+    async def async_get_recommended_cleans(
+        self, serial_number: str
+    ) -> dict[str, dict[str, float]]:
+        """Return dust predictions per map/zone for supported robot vacuums.
+
+        Endpoint: GET /v1/app/{serial}/recommended-cleans (360 Vis Nav)
+        Returns a dict of {persistentMapId: {zoneId: dust_mg_total}}.
+        """
+
+        url = f"{self._base_url}/v1/app/{serial_number}/recommended-cleans"
+        async with self._session.get(url, headers=self._headers()) as resp:
+            resp.raise_for_status()
+            payload = await resp.json(content_type=None)
+
+        if not isinstance(payload, list):
+            raise ValueError("Unexpected Dyson recommended cleans response (expected list)")
+
+        out: dict[str, dict[str, float]] = {}
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            map_id = _as_str(raw.get("persistentMapId"))
+            if not map_id:
+                continue
+            zone_predictions = raw.get("zonePredictions")
+            if not isinstance(zone_predictions, list):
+                continue
+            zones: dict[str, float] = out.setdefault(map_id, {})
+            for pred in zone_predictions:
+                if not isinstance(pred, dict):
+                    continue
+                zone_id = _as_str(pred.get("zoneId"))
+                if not zone_id:
+                    continue
+                dust_mg_total = 0.0
+                dust_list = pred.get("zoneDustMilligrams")
+                if isinstance(dust_list, list):
+                    for dust in dust_list:
+                        if not isinstance(dust, dict):
+                            continue
+                        if _as_str(dust.get("name")) != "total":
+                            continue
+                        weight = dust.get("weight")
+                        if isinstance(weight, (int, float)):
+                            dust_mg_total = float(weight)
+                            break
+                zones[zone_id] = dust_mg_total
+
+        return out

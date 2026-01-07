@@ -7,9 +7,11 @@ MQTT connection.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import json
 import logging
+import time
 from typing import Any, Callable, Optional
 
 from aiohttp import ClientResponseError
@@ -125,7 +127,16 @@ class DysonCloudDevice:
         # paho-mqtt TLS setup loads system certs and can block; run in executor.
         await self._hass.async_add_executor_job(self._mqtt.start)
         self._subscribe()
-        self._request_initial_state()
+        # Subscriptions are async; requesting immediately can race and miss the response.
+        # Delay slightly to ensure we receive the initial CURRENT-STATE.
+        self._hass.async_create_task(self._async_request_initial_state())
+
+    async def _async_request_initial_state(self) -> None:
+        await asyncio.sleep(1)
+        try:
+            self._request_initial_state()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Initial state request failed for %s", self._info.serial)
 
     async def async_stop(self) -> None:
         if self._mqtt:
@@ -156,6 +167,11 @@ class DysonCloudRobot(DysonCloudDevice):
         self._maps: list[DysonPersistentMapMetadata] = []
         self._selected_map_id: Optional[str] = None
         self._selected_zone_id: Optional[str] = None
+        self._selected_zone_ids: list[str] = []
+        self._last_message_time: Optional[str] = None
+        self._dust_by_map: dict[str, dict[str, float]] = {}
+        self._last_dust_refresh = 0.0
+        self._seen_current_state = False
 
     async def async_start(self) -> None:
         await super().async_start()
@@ -198,11 +214,14 @@ class DysonCloudRobot(DysonCloudDevice):
         else:
             self._selected_map_id = None
             self._selected_zone_id = None
+            self._selected_zone_ids = []
 
         if self._selected_map_id and not self._selected_zone_id:
             zones = self._zones_for_map(self._selected_map_id)
             if zones:
                 self._selected_zone_id = zones[0].id
+                if not self._selected_zone_ids:
+                    self._selected_zone_ids = [zones[0].id]
 
         _LOGGER.debug(
             "Robot %s loaded %d persistent maps (selected_map=%s selected_zone=%s)",
@@ -211,7 +230,43 @@ class DysonCloudRobot(DysonCloudDevice):
             self._selected_map_id,
             self._selected_zone_id,
         )
+        self._hass.async_create_task(self.async_refresh_dust_predictions())
         self._emit(MessageType.STATE)
+
+    async def async_refresh_dust_predictions(self) -> None:
+        """Fetch per-zone dust predictions (supported on 360 Vis Nav)."""
+        now = time.monotonic()
+        if self._last_dust_refresh and (now - self._last_dust_refresh) < 300:
+            return
+        self._last_dust_refresh = now
+
+        try:
+            dust_by_map = await self._cloud.async_get_recommended_cleans(self._info.serial)
+        except ClientResponseError as err:
+            if err.status in (400, 401, 403, 404):
+                _LOGGER.debug(
+                    "Robot %s recommended-cleans not available (%s)",
+                    self._info.serial,
+                    err.status,
+                )
+                return
+            _LOGGER.debug(
+                "Robot %s recommended-cleans request failed: %s",
+                self._info.serial,
+                err,
+            )
+            return
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Robot %s recommended-cleans request failed: %s",
+                self._info.serial,
+                err,
+            )
+            return
+
+        if isinstance(dust_by_map, dict):
+            self._dust_by_map = dust_by_map
+            self._emit(MessageType.STATE)
 
     def _subscribe(self) -> None:
         assert self._mqtt
@@ -289,6 +344,7 @@ class DysonCloudRobot(DysonCloudDevice):
         self._selected_map_id = map_id
         zones = self._zones_for_map(map_id)
         self._selected_zone_id = zones[0].id if zones else None
+        self._selected_zone_ids = [self._selected_zone_id] if self._selected_zone_id else []
         self._emit(MessageType.STATE)
 
     @property
@@ -314,6 +370,78 @@ class DysonCloudRobot(DysonCloudDevice):
         self._selected_zone_id = zone_id
         self._emit(MessageType.STATE)
 
+    @property
+    def selected_zone_ids(self) -> list[str]:
+        return list(self._selected_zone_ids)
+
+    def clear_selected_zones(self) -> None:
+        self._selected_zone_ids = []
+        self._emit(MessageType.STATE)
+
+    def add_selected_zone(self, zone_id: Optional[str] = None) -> None:
+        """Add a zone to the multi-zone selection list."""
+        zone_id = zone_id or self._selected_zone_id
+        if not isinstance(zone_id, str) or not zone_id:
+            return
+        if not self._selected_map_id:
+            return
+        zones = self._zones_for_map(self._selected_map_id)
+        if not any(z.id == zone_id for z in zones):
+            raise ValueError(f"Unknown zone id: {zone_id}")
+        if zone_id not in self._selected_zone_ids:
+            self._selected_zone_ids.append(zone_id)
+            self._emit(MessageType.STATE)
+
+    def _zone_name(self, zone_id: str) -> Optional[str]:
+        map_id = self._selected_map_id or str(self._status.get("persistentMapId") or "")
+        if not map_id:
+            return None
+        zones = self._zones_for_map(map_id)
+        for z in zones:
+            if z.id == zone_id:
+                return z.name
+        return None
+
+    @property
+    def current_zone_name(self) -> Optional[str]:
+        zone_id = self._status.get("zoneId")
+        if isinstance(zone_id, str) and zone_id:
+            return self._zone_name(zone_id) or zone_id
+        return None
+
+    @property
+    def selected_zone_names(self) -> list[str]:
+        out: list[str] = []
+        for zone_id in self._selected_zone_ids:
+            out.append(self._zone_name(zone_id) or zone_id)
+        return out
+
+    @property
+    def last_message_time(self) -> Optional[str]:
+        return self._last_message_time
+
+    @property
+    def selected_zones_dust_mg(self) -> Optional[float]:
+        map_id = self._selected_map_id or str(self._status.get("persistentMapId") or "")
+        if not map_id:
+            return None
+        dust_by_zone = self._dust_by_map.get(map_id)
+        if not isinstance(dust_by_zone, dict):
+            return None
+        zones = [z for z in self._selected_zone_ids if isinstance(z, str) and z]
+        if not zones and isinstance(self._selected_zone_id, str) and self._selected_zone_id:
+            zones = [self._selected_zone_id]
+        if not zones:
+            return None
+        total = 0.0
+        found = False
+        for zone_id in zones:
+            weight = dust_by_zone.get(zone_id)
+            if isinstance(weight, (int, float)):
+                total += float(weight)
+                found = True
+        return total if found else None
+
     def clean_selected_zone(self) -> None:
         """Start a zone clean for the currently selected map/zone."""
         map_id = self._selected_map_id
@@ -334,6 +462,53 @@ class DysonCloudRobot(DysonCloudDevice):
             "orderedZones": [],
             "persistentMapId": map_meta.id,
             "unorderedZones": [zone_id],
+            "zonesDefinitionLastUpdatedDate": map_meta.zones_definition_last_updated_date,
+        }
+        self._publish(
+            {
+                "msg": "START",
+                "mode-reason": "LAPP",
+                "fullCleanType": "immediate",
+                "cleaningMode": "zoneConfigured",
+                "cleaningProgramme": cleaning_programme,
+            }
+        )
+
+    def clean_selected_zones(self) -> None:
+        """Start a zone clean for the currently selected map and selected zones list."""
+        map_id = self._selected_map_id
+        if not map_id:
+            _LOGGER.warning(
+                "Robot %s cannot start multi-zone clean without a selected map",
+                self._info.serial,
+            )
+            return
+
+        map_meta = next((m for m in self._maps if m.id == map_id), None)
+        if not map_meta:
+            _LOGGER.warning("Robot %s selected map %s not found", self._info.serial, map_id)
+            return
+
+        zones = [z for z in self._selected_zone_ids if isinstance(z, str) and z]
+        if not zones and self._selected_zone_id:
+            zones = [self._selected_zone_id]
+        if not zones:
+            _LOGGER.warning("Robot %s cannot start multi-zone clean without zones", self._info.serial)
+            return
+
+        valid_zone_ids = {z.id for z in map_meta.zones}
+        zones = [z for z in zones if z in valid_zone_ids]
+        if not zones:
+            _LOGGER.warning(
+                "Robot %s cannot start multi-zone clean: selected zones not in map",
+                self._info.serial,
+            )
+            return
+
+        cleaning_programme = {
+            "orderedZones": [],
+            "persistentMapId": map_meta.id,
+            "unorderedZones": zones,
             "zonesDefinitionLastUpdatedDate": map_meta.zones_definition_last_updated_date,
         }
         self._publish(
@@ -406,12 +581,24 @@ class DysonCloudRobot(DysonCloudDevice):
                 self._status.pop(key, None)
 
             msg.pop("msg", None)
+            time_value = msg.get("time")
+            if isinstance(time_value, str) and time_value:
+                self._last_message_time = time_value
             msg.pop("time", None)
             self._status.update(msg)
+            if not self._seen_current_state:
+                self._seen_current_state = True
+                _LOGGER.warning(
+                    "Robot %s initial CURRENT-STATE batteryChargeLevel=%r state=%r",
+                    self._info.serial,
+                    self._status.get("batteryChargeLevel"),
+                    self._status.get("state"),
+                )
             current_map_id = str(self._status.get("persistentMapId") or "")
             if current_map_id and current_map_id != (self._selected_map_id or ""):
                 if any(m.id == current_map_id for m in self._maps):
                     self._selected_map_id = current_map_id
+                    self._hass.async_create_task(self.async_refresh_dust_predictions())
             self._emit(MessageType.STATE)
 
 
