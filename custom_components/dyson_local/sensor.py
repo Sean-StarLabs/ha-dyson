@@ -37,6 +37,7 @@ async def async_setup_entry(
             DysonRobotCurrentAreaSensor(device, name),
             DysonRobotSelectedAreasSensor(device, name),
             DysonRobotSelectedDustEstimateSensor(device, name),
+            DysonRobotDustByAreaSensor(device, name),
             DysonRobotLastMessageTimeSensor(device, name),
         ]
     else:
@@ -206,6 +207,68 @@ class DysonRobotSelectedDustEstimateSensor(DysonSensor):
             "selected_zone_ids": list(getattr(self._device, "selected_zone_ids", []) or []),
             "dust_by_zone_mg": {k: float(v) for k, v in dust_by_zone.items() if isinstance(v, (int, float))},
             "dust_by_area_mg": dust_by_area,
+        }
+
+class DysonRobotDustByAreaSensor(DysonSensor):
+    """Per-area dust predictions (Vis Nav)."""
+
+    _SENSOR_TYPE = "dust_by_area"
+    _SENSOR_NAME = "Area Dust"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @staticmethod
+    def _level_for_mg(mg: float) -> str:
+        # Heuristic buckets (Dyson reports mg; values observed ~0-10).
+        if mg < 2:
+            return "Low"
+        if mg < 5:
+            return "Medium"
+        if mg < 8:
+            return "High"
+        return "Very High"
+
+    @property
+    def native_value(self) -> Optional[str]:
+        dust_by_zone = getattr(self._device, "dust_by_zone_mg", None)
+        zones = getattr(self._device, "zones", None)
+        if not isinstance(dust_by_zone, dict) or not isinstance(zones, list):
+            return None
+
+        zone_name_by_id = {z_id: z_name for z_id, z_name in zones if isinstance(z_id, str) and isinstance(z_name, str)}
+        pairs: list[tuple[str, float]] = []
+        for zone_id, mg in dust_by_zone.items():
+            if isinstance(zone_id, str) and isinstance(mg, (int, float)):
+                name = zone_name_by_id.get(zone_id, zone_id)
+                pairs.append((name, float(mg)))
+        if not pairs:
+            return None
+
+        # Sort highest dust first for scanability.
+        pairs.sort(key=lambda p: p[1], reverse=True)
+        parts = [f"{name}: {self._level_for_mg(mg)}" for name, mg in pairs]
+        return "; ".join(parts)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        dust_by_zone = getattr(self._device, "dust_by_zone_mg", None)
+        zones = getattr(self._device, "zones", None)
+        if not isinstance(dust_by_zone, dict) or not isinstance(zones, list):
+            return {}
+
+        zone_name_by_id = {z_id: z_name for z_id, z_name in zones if isinstance(z_id, str) and isinstance(z_name, str)}
+        dust_by_area_mg: dict[str, float] = {}
+        dust_by_area_level: dict[str, str] = {}
+        for zone_id, mg in dust_by_zone.items():
+            if not isinstance(zone_id, str) or not isinstance(mg, (int, float)):
+                continue
+            name = zone_name_by_id.get(zone_id, zone_id)
+            dust_by_area_mg[name] = float(mg)
+            dust_by_area_level[name] = self._level_for_mg(float(mg))
+
+        return {
+            "selected_map_id": getattr(self._device, "selected_map_id", None),
+            "dust_by_area_mg": dust_by_area_mg,
+            "dust_by_area_level": dust_by_area_level,
         }
 
 
