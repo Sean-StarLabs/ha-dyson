@@ -48,11 +48,16 @@ async def async_setup_entry(
 class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
     """Dyson robot vacuum entity (cloud-only)."""
 
+    def _state_tokens(self) -> set[str]:
+        raw = self._raw_state().upper()
+        return {t for t in raw.replace("-", "_").split("_") if t}
+
     def _raw_state(self) -> str:
         return str(getattr(self._device, "state", "UNKNOWN"))
 
     def _friendly_status(self, raw_state: str) -> str:
         raw = raw_state.upper()
+        tokens = self._state_tokens()
         if "FAULT" in raw:
             summary = str(getattr(self._device, "fault_summary", "") or "")
             if summary:
@@ -62,8 +67,10 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
             return "Paused"
         if "CLEAN" in raw and "CHARG" in raw:
             return "Charging to continue cleaning"
-        if "CHARG" in raw:
+        if "CHARGING" in tokens or "CHARGED" in tokens:
             return "Charging"
+        if "DISCHARGING" in tokens and not ("CHARGING" in tokens or "CHARGED" in tokens):
+            return "Off dock"
         if "DOCK" in raw or "INACTIVE" in raw:
             return "Docked"
         if "RETURN" in raw or "ABORT" in raw:
@@ -99,6 +106,7 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
     @property
     def activity(self) -> VacuumActivity:
         raw = self._raw_state().upper()
+        tokens = self._state_tokens()
         if "FAULT" in raw:
             return VacuumActivity.ERROR
         if "PAUSED" in raw:
@@ -111,7 +119,7 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
             return VacuumActivity.RETURNING
         if "RUN" in raw or "TRAVERS" in raw or "DISCOVER" in raw or "MAPPING" in raw:
             return VacuumActivity.CLEANING
-        if "DOCK" in raw or "CHARG" in raw or "INACTIVE" in raw:
+        if "DOCK" in raw or "CHARGING" in tokens or "CHARGED" in tokens or "INACTIVE" in raw:
             return VacuumActivity.DOCKED
         return VacuumActivity.DOCKED
 

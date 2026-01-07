@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Optional
 from concurrent.futures import Future
@@ -338,6 +339,16 @@ class DysonCloudRobot(DysonCloudDevice):
     def _state_upper(self) -> str:
         return self.state.upper()
 
+    def _state_tokens(self) -> set[str]:
+        """Tokenize the Dyson state to avoid substring bugs (e.g. DISCHARGING contains CHARG)."""
+        raw = self._state_upper()
+        # Dyson states are typically underscore-separated; keep it robust.
+        return {t for t in re.split(r"[^A-Z0-9]+", raw) if t}
+
+    def _state_has_any_token(self, *tokens: str) -> bool:
+        state_tokens = self._state_tokens()
+        return any(t in state_tokens for t in tokens)
+
     @property
     def active_faults(self) -> list[dict[str, Any]]:
         faults = self._status.get("activeFaults")
@@ -395,15 +406,14 @@ class DysonCloudRobot(DysonCloudDevice):
 
     @property
     def is_charging(self) -> bool:
-        state = str(self._status.get("state") or "")
-        return "CHARG" in state or "DOCK" in state
+        # Important: "DISCHARGING" must not count as charging.
+        return self._state_has_any_token("CHARGING", "CHARGED")
 
     @property
     def is_docked(self) -> bool:
         """Best-effort: True when the robot is on the dock/charging."""
-        raw = self._state_upper()
         # Most devices encode dock/charge state in the state string.
-        if any(k in raw for k in ("DOCK", "CHARG", "CHARGED")):
+        if self._state_has_any_token("DOCKED", "DOCK", "CHARGING", "CHARGED"):
             return True
 
         # Fall back to any explicit status keys we can find.
@@ -638,8 +648,9 @@ class DysonCloudRobot(DysonCloudDevice):
     def can_return_to_base(self) -> bool:
         if self.has_fault:
             return False
-        # Allow return-to-base when the robot is undocked (even if idle), and during sessions.
-        return self.is_clean_session_active or not self.is_docked
+        # Dyson app appears to block actions when the robot is undocked+idle ("stranded").
+        # Keep return-to-base only during active sessions.
+        return self.is_clean_session_active
 
     def _start_cleaning_strategy(self) -> Optional[str]:
         strategy = self.current_power_mode
