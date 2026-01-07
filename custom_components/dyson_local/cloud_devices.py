@@ -399,6 +399,29 @@ class DysonCloudRobot(DysonCloudDevice):
         return "CHARG" in state or "DOCK" in state
 
     @property
+    def is_docked(self) -> bool:
+        """Best-effort: True when the robot is on the dock/charging."""
+        raw = self._state_upper()
+        # Most devices encode dock/charge state in the state string.
+        if any(k in raw for k in ("DOCK", "CHARG", "CHARGED")):
+            return True
+
+        # Fall back to any explicit status keys we can find.
+        docked = self._status_bool("isDocked", "docked", "dock", "onDock", "ondock")
+        if docked is not None:
+            return docked
+
+        dock_state = self._status_str("dockState", "dockstate")
+        if dock_state:
+            s = dock_state.upper()
+            if any(k in s for k in ("DOCK", "CHARG", "CHARGED", "ON_DOCK")):
+                return True
+            if any(k in s for k in ("OFF_DOCK", "UNDOCK")):
+                return False
+
+        return False
+
+    @property
     def is_paused(self) -> bool:
         return "PAUSED" in self._state_upper()
 
@@ -598,6 +621,10 @@ class DysonCloudRobot(DysonCloudDevice):
         # START is also used as RESUME when paused.
         if self.is_paused:
             return True
+        # Empirical UX match: if the robot is manually moved off the dock, the Dyson app
+        # blocks starting a clean until it is returned to the dock.
+        if not self.is_docked:
+            return False
         # Only allow starting from idle/docked states.
         return not self.is_clean_session_active
 
@@ -611,8 +638,8 @@ class DysonCloudRobot(DysonCloudDevice):
     def can_return_to_base(self) -> bool:
         if self.has_fault:
             return False
-        # Return-to-base is only meaningful during a cleaning session.
-        return self.is_clean_session_active
+        # Allow return-to-base when the robot is undocked (even if idle), and during sessions.
+        return self.is_clean_session_active or not self.is_docked
 
     def _start_cleaning_strategy(self) -> Optional[str]:
         strategy = self.current_power_mode
