@@ -63,8 +63,20 @@ def _cleanup_legacy_entities(hass: HomeAssistant, config_entry_id: str) -> None:
             continue
         unique_id = entry.unique_id or ""
         # Legacy duplicate: global robot cleaning level is now controlled via the
-        # vacuum's fan-speed UI (VacuumEntityFeature.FAN_SPEED).
+        # Area Level select (Area=All) and the vacuum entity has no fan-speed feature.
         if unique_id.endswith("-cleaning-level"):
+            removed.append(entry.entity_id)
+            ent_reg.async_remove(entry.entity_id)
+            continue
+
+        # Removed entities (we'll re-add later when there's reliable upstream data).
+        if unique_id.endswith("-tilt"):
+            removed.append(entry.entity_id)
+            ent_reg.async_remove(entry.entity_id)
+            continue
+
+        # Replaced by per-area dust sensors.
+        if unique_id.endswith("-selected_dust_mg") or unique_id.endswith("-dust_by_area"):
             removed.append(entry.entity_id)
             ent_reg.async_remove(entry.entity_id)
 

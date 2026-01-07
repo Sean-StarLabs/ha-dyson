@@ -137,7 +137,6 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
             "fault_codes": getattr(self._device, "fault_codes", []),
             "bin_present": bool(getattr(self._device, "is_bin_present", True)),
             "filter_present": bool(getattr(self._device, "is_filter_present", True)),
-            "tilt": bool(getattr(self._device, "tilt", False)),
         }
 
     def start(self) -> None:

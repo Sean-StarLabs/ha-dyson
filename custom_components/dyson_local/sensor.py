@@ -6,6 +6,7 @@ from typing import Callable, Union, Optional
 from libdyson.const import MessageType
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass, SensorEntity
+from homeassistant.helpers import entity_registry as er
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
@@ -31,15 +32,36 @@ async def async_setup_entry(
     """Set up Dyson sensor from a config entry."""
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
+
+    # Cleanup: remove legacy dust sensors (replaced by per-area dust entities).
+    ent_reg = er.async_get(hass)
+    removed: list[str] = []
+    for entry in er.async_entries_for_config_entry(ent_reg, config_entry.entry_id):
+        if entry.platform != DOMAIN:
+            continue
+        unique_id = entry.unique_id or ""
+        if unique_id.endswith("-selected_dust_mg") or unique_id.endswith("-dust_by_area"):
+            ent_reg.async_remove(entry.entity_id)
+            removed.append(entry.entity_id)
+    if removed:
+        schedule_save = getattr(ent_reg, "async_schedule_save", None)
+        if callable(schedule_save):
+            schedule_save()
+
     if config_entry.data.get(CONF_CATEGORY) == "robot":
         entities = [
             DysonBatterySensor(device, name),
             DysonRobotCurrentAreaSensor(device, name),
             DysonRobotSelectedAreasSensor(device, name),
-            DysonRobotSelectedDustEstimateSensor(device, name),
-            DysonRobotDustByAreaSensor(device, name),
             DysonRobotLastMessageTimeSensor(device, name),
         ]
+
+        # Add per-area dust prediction sensors (Vis Nav).
+        zones = getattr(device, "zones", None)
+        if isinstance(zones, list):
+            for zone_id, zone_name in zones:
+                if isinstance(zone_id, str) and zone_id and isinstance(zone_name, str) and zone_name:
+                    entities.append(DysonRobotAreaDustSensor(device, name, zone_id, zone_name))
     else:
         entities = [
             DysonHumiditySensor(device, name),
@@ -177,99 +199,56 @@ class DysonRobotSelectedAreasSensor(DysonSensor):
             "dust_by_area_mg": dust_by_area,
         }
 
+class DysonRobotAreaDustSensor(DysonSensor):
+    """Dust prediction for a specific area (Vis Nav)."""
 
-class DysonRobotSelectedDustEstimateSensor(DysonSensor):
-    """Estimated dust load for currently selected zones (Vis Nav)."""
-
-    _SENSOR_TYPE = "selected_dust_mg"
-    _SENSOR_NAME = "Dust Estimate"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_native_unit_of_measurement = "mg"
+
+    def __init__(self, device: DysonDevice, name: str, zone_id: str, zone_name: str):
+        super().__init__(device, name)
+        self._zone_id = zone_id
+        self._zone_name = zone_name
+
+    @staticmethod
+    def _level_for_mg(mg: float) -> str:
+        # Dyson UI buckets (empirical): Low/Moderate/High.
+        if mg < 3:
+            return "Low"
+        if mg < 6:
+            return "Moderate"
+        return "High"
 
     @property
-    def native_value(self) -> Optional[float]:
-        value = getattr(self._device, "selected_zones_dust_mg", None)
-        return float(value) if isinstance(value, (int, float)) else None
+    def sub_name(self) -> str:
+        return f"{self._zone_name} Dust"
+
+    @property
+    def sub_unique_id(self) -> str:
+        return f"dust-{self._zone_id}"
+
+    @property
+    def native_value(self) -> Optional[str]:
+        dust_by_zone = getattr(self._device, "dust_by_zone_mg", None)
+        if not isinstance(dust_by_zone, dict):
+            return None
+        mg = dust_by_zone.get(self._zone_id)
+        if not isinstance(mg, (int, float)):
+            return None
+        return self._level_for_mg(float(mg))
 
     @property
     def extra_state_attributes(self) -> dict:
         dust_by_zone = getattr(self._device, "dust_by_zone_mg", None)
         if not isinstance(dust_by_zone, dict):
-            dust_by_zone = {}
-        zones = dict(getattr(self._device, "zones", []) or [])
-        dust_by_area: dict[str, float] = {}
-        for zone_id, mg in dust_by_zone.items():
-            if isinstance(zone_id, str) and isinstance(mg, (int, float)):
-                dust_by_area[zones.get(zone_id, zone_id)] = float(mg)
-
-        return {
-            "selected_map_id": getattr(self._device, "selected_map_id", None),
-            "selected_zone_ids": list(getattr(self._device, "selected_zone_ids", []) or []),
-            "dust_by_zone_mg": {k: float(v) for k, v in dust_by_zone.items() if isinstance(v, (int, float))},
-            "dust_by_area_mg": dust_by_area,
-        }
-
-class DysonRobotDustByAreaSensor(DysonSensor):
-    """Per-area dust predictions (Vis Nav)."""
-
-    _SENSOR_TYPE = "dust_by_area"
-    _SENSOR_NAME = "Area Dust"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    @staticmethod
-    def _level_for_mg(mg: float) -> str:
-        # Heuristic buckets (Dyson reports mg; values observed ~0-10).
-        if mg < 2:
-            return "Low"
-        if mg < 5:
-            return "Medium"
-        if mg < 8:
-            return "High"
-        return "Very High"
-
-    @property
-    def native_value(self) -> Optional[str]:
-        dust_by_zone = getattr(self._device, "dust_by_zone_mg", None)
-        zones = getattr(self._device, "zones", None)
-        if not isinstance(dust_by_zone, dict) or not isinstance(zones, list):
-            return None
-
-        zone_name_by_id = {z_id: z_name for z_id, z_name in zones if isinstance(z_id, str) and isinstance(z_name, str)}
-        pairs: list[tuple[str, float]] = []
-        for zone_id, mg in dust_by_zone.items():
-            if isinstance(zone_id, str) and isinstance(mg, (int, float)):
-                name = zone_name_by_id.get(zone_id, zone_id)
-                pairs.append((name, float(mg)))
-        if not pairs:
-            return None
-
-        # Sort highest dust first for scanability.
-        pairs.sort(key=lambda p: p[1], reverse=True)
-        parts = [f"{name}: {self._level_for_mg(mg)}" for name, mg in pairs]
-        return "; ".join(parts)
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        dust_by_zone = getattr(self._device, "dust_by_zone_mg", None)
-        zones = getattr(self._device, "zones", None)
-        if not isinstance(dust_by_zone, dict) or not isinstance(zones, list):
             return {}
-
-        zone_name_by_id = {z_id: z_name for z_id, z_name in zones if isinstance(z_id, str) and isinstance(z_name, str)}
-        dust_by_area_mg: dict[str, float] = {}
-        dust_by_area_level: dict[str, str] = {}
-        for zone_id, mg in dust_by_zone.items():
-            if not isinstance(zone_id, str) or not isinstance(mg, (int, float)):
-                continue
-            name = zone_name_by_id.get(zone_id, zone_id)
-            dust_by_area_mg[name] = float(mg)
-            dust_by_area_level[name] = self._level_for_mg(float(mg))
-
-        return {
+        mg = dust_by_zone.get(self._zone_id)
+        attrs: dict = {
+            "zone_id": self._zone_id,
             "selected_map_id": getattr(self._device, "selected_map_id", None),
-            "dust_by_area_mg": dust_by_area_mg,
-            "dust_by_area_level": dust_by_area_level,
         }
+        if isinstance(mg, (int, float)):
+            attrs["mg"] = float(mg)
+        return attrs
 
 
 class DysonRobotLastMessageTimeSensor(DysonSensor):

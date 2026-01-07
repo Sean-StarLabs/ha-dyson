@@ -2,6 +2,7 @@
 
 from typing import Callable
 
+from homeassistant.helpers import entity_registry as er
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
@@ -23,13 +24,28 @@ async def async_setup_entry(
     """Set up Dyson binary sensor from a config entry."""
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
+
+    # Cleanup: remove the legacy Tilt sensor (we’ll add it back once we see a reliable
+    # robot-specific field that matches the Dyson app).
+    ent_reg = er.async_get(hass)
+    removed: list[str] = []
+    for entry in er.async_entries_for_config_entry(ent_reg, config_entry.entry_id):
+        if entry.platform != DOMAIN:
+            continue
+        unique_id = entry.unique_id or ""
+        if unique_id.endswith("-tilt"):
+            ent_reg.async_remove(entry.entity_id)
+            removed.append(entry.entity_id)
+    if removed:
+        schedule_save = getattr(ent_reg, "async_schedule_save", None)
+        if callable(schedule_save):
+            schedule_save()
+
     entities = []
     if hasattr(device, "is_charging"):
         entities.append(DysonVacuumBatteryChargingSensor(device, name))
     if hasattr(device, "is_bin_full"):
         entities.append(Dyson360HeuristBinFullSensor(device, name))
-    if hasattr(device, "tilt"):
-        entities.append(DysonPureHotCoolLinkTiltSensor(device, name))
     async_add_entities(entities)
 
 
@@ -110,24 +126,3 @@ class Dyson360VisNavBinFullSensor(DysonEntity, BinarySensorEntity):
         """Return the sensor's unique id."""
         return "bin_full"
 
-
-class DysonPureHotCoolLinkTiltSensor(DysonEntity, BinarySensorEntity):
-    """Dyson Pure Hot+Cool Link tilt sensor."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_icon = "mdi:angle-acute"
-
-    @property
-    def is_on(self) -> bool:
-        """Return if the sensor is on."""
-        return bool(getattr(self._device, "tilt", False))
-
-    @property
-    def sub_name(self) -> str:
-        """Return the name of the sensor."""
-        return "Tilt"
-
-    @property
-    def sub_unique_id(self):
-        """Return the sensor's unique id."""
-        return "tilt"

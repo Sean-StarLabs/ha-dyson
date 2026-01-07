@@ -205,7 +205,10 @@ class DysonCloudRobot(DysonCloudDevice):
     async def async_start(self) -> None:
         await self._async_load_zone_strategies()
         await super().async_start()
-        self._hass.async_create_task(self.async_refresh_maps())
+        # Load maps (and dust predictions) up-front so platforms can create the right entities.
+        # This is best-effort; failures are handled inside these methods.
+        await self.async_refresh_maps()
+        await self.async_refresh_dust_predictions()
 
     async def _async_load_zone_strategies(self) -> None:
         try:
