@@ -16,12 +16,12 @@ from homeassistant.exceptions import HomeAssistantError
 from . import DysonEntity
 from .const import DATA_DEVICES, DOMAIN
 
-SUPPORTED_FEATURES = (
-    VacuumEntityFeature.START
-    | VacuumEntityFeature.PAUSE
-    | VacuumEntityFeature.RETURN_HOME
-    | VacuumEntityFeature.STATUS
-)
+SUPPORTED_FEATURES: set[VacuumEntityFeature] = {
+    VacuumEntityFeature.START,
+    VacuumEntityFeature.PAUSE,
+    VacuumEntityFeature.RETURN_HOME,
+    VacuumEntityFeature.STATUS,
+}
 
 ATTR_POSITION = "position"
 
@@ -64,19 +64,20 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
         return self._device.is_connected
 
     @property
-    def supported_features(self) -> int:
+    def supported_features(self) -> set[VacuumEntityFeature]:
+        # HA 2025.12 expects an iterable of VacuumEntityFeature (not an int bitmask).
         # Features should reflect what the Dyson app allows at this moment.
         if bool(getattr(self._device, "has_fault", False)):
-            return VacuumEntityFeature.STATUS
+            return {VacuumEntityFeature.STATUS}
 
-        features = VacuumEntityFeature.STATUS
+        features: set[VacuumEntityFeature] = {VacuumEntityFeature.STATUS}
         if bool(getattr(self._device, "can_start", True)):
-            features |= VacuumEntityFeature.START
+            features.add(VacuumEntityFeature.START)
         if bool(getattr(self._device, "can_pause", True)):
-            features |= VacuumEntityFeature.PAUSE
+            features.add(VacuumEntityFeature.PAUSE)
         if bool(getattr(self._device, "can_return_to_base", True)):
-            features |= VacuumEntityFeature.RETURN_HOME
-        return int(features)
+            features.add(VacuumEntityFeature.RETURN_HOME)
+        return features
 
     @property
     def status(self) -> str:
