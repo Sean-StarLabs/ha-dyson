@@ -31,6 +31,17 @@ from .cloud_client import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Empirical robot fault-code mappings (model/firmware dependent).
+# Add codes here as we observe them in the wild to improve HA UX.
+_FAULT_CODE_TO_SUMMARY: dict[str, str] = {
+    # RB03 (360 Vis Nav) when dust bin is removed.
+    "7.0-1": "Bin removed",
+}
+
+_BIN_ABSENT_FAULT_CODES: set[str] = {
+    "7.0-1",
+}
+
 
 def _normalise_key(key: str) -> str:
     # Dyson uses kebab-case in some command fields (e.g. mode-reason).
@@ -180,6 +191,7 @@ class DysonCloudRobot(DysonCloudDevice):
             version=1,
             key=f"dyson_local.{info.serial}.zone_strategies",
         )
+        self._last_logged_fault_key: Optional[str] = None
 
     async def async_start(self) -> None:
         await self._async_load_zone_strategies()
@@ -361,8 +373,17 @@ class DysonCloudRobot(DysonCloudDevice):
             code = f.get("faultCode")
             if code is None:
                 continue
-            out.append(str(code))
+            out.append(self._normalise_fault_code(code))
         return out
+
+    @staticmethod
+    def _normalise_fault_code(code: Any) -> str:
+        # Dyson may format these differently across models/firmwares.
+        s = str(code).strip().replace(" ", "")
+        # Observed on RB03: "7.0.-1" (extra dot before dash).
+        while ".-" in s:
+            s = s.replace(".-", "-")
+        return s
 
     @property
     def is_charging(self) -> bool:
@@ -422,6 +443,10 @@ class DysonCloudRobot(DysonCloudDevice):
 
     @property
     def is_bin_present(self) -> bool:
+        # Fault-code override (most reliable when available).
+        if any(self._normalise_fault_code(code) in _BIN_ABSENT_FAULT_CODES for code in self.fault_codes):
+            return False
+
         # Best-effort: different models report different keys.
         present = self._status_bool(
             "binPresent",
@@ -486,6 +511,10 @@ class DysonCloudRobot(DysonCloudDevice):
         """Human-readable fault message suitable for HA UI."""
         if not self.has_fault:
             return ""
+        for code in self.fault_codes:
+            summary = _FAULT_CODE_TO_SUMMARY.get(self._normalise_fault_code(code))
+            if summary:
+                return summary
         if not self.is_bin_present:
             return "Bin removed"
         if self._fault_has("FILTER", "MISSING", "NOT INSTALLED", "REMOVED", "ABSENT"):
@@ -978,6 +1007,20 @@ class DysonCloudRobot(DysonCloudDevice):
                 if any(m.id == current_map_id for m in self._maps):
                     self._selected_map_id = current_map_id
                     self._hass.async_create_task(self.async_refresh_dust_predictions())
+
+            if self.has_fault:
+                key = f"{self._state_upper()}|{','.join(self.fault_codes)}"
+                if key != self._last_logged_fault_key:
+                    self._last_logged_fault_key = key
+                    _LOGGER.warning(
+                        "Robot %s fault: state=%r codes=%s bin_present=%s summary=%r activeFaults=%r",
+                        self._info.serial,
+                        self._status.get("state"),
+                        self.fault_codes,
+                        self.is_bin_present,
+                        self.fault_summary,
+                        self.active_faults,
+                    )
             self._emit(MessageType.STATE)
 
 

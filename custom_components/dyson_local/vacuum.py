@@ -16,12 +16,22 @@ from homeassistant.exceptions import HomeAssistantError
 from . import DysonEntity
 from .const import DATA_DEVICES, DOMAIN
 
-SUPPORTED_FEATURES: set[VacuumEntityFeature] = {
-    VacuumEntityFeature.START,
-    VacuumEntityFeature.PAUSE,
-    VacuumEntityFeature.RETURN_HOME,
-    VacuumEntityFeature.STATUS,
-}
+class _FeatureMask(int):
+    """Bitmask that supports `VacuumEntityFeature.X in supported_features`."""
+
+    def __contains__(self, item: object) -> bool:
+        try:
+            return bool(int(self) & int(item))  # type: ignore[arg-type]
+        except Exception:
+            return False
+
+
+SUPPORTED_FEATURE_MASK = int(
+    VacuumEntityFeature.START
+    | VacuumEntityFeature.PAUSE
+    | VacuumEntityFeature.RETURN_HOME
+    | VacuumEntityFeature.STATUS
+)
 
 ATTR_POSITION = "position"
 
@@ -67,20 +77,20 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
         return self._device.is_connected
 
     @property
-    def supported_features(self) -> set[VacuumEntityFeature]:
-        # HA 2025.12 expects an iterable of VacuumEntityFeature (not an int bitmask).
-        # Features should reflect what the Dyson app allows at this moment.
+    def supported_features(self) -> _FeatureMask:
+        # HA core uses `VacuumEntityFeature.X in self.supported_features` checks.
+        # Google Assistant expects supported_features to be an int-like bitmask.
         if bool(getattr(self._device, "has_fault", False)):
-            return {VacuumEntityFeature.STATUS}
+            return _FeatureMask(int(VacuumEntityFeature.STATUS))
 
-        features: set[VacuumEntityFeature] = {VacuumEntityFeature.STATUS}
+        mask = int(VacuumEntityFeature.STATUS)
         if bool(getattr(self._device, "can_start", True)):
-            features.add(VacuumEntityFeature.START)
+            mask |= int(VacuumEntityFeature.START)
         if bool(getattr(self._device, "can_pause", True)):
-            features.add(VacuumEntityFeature.PAUSE)
+            mask |= int(VacuumEntityFeature.PAUSE)
         if bool(getattr(self._device, "can_return_to_base", True)):
-            features.add(VacuumEntityFeature.RETURN_HOME)
-        return features
+            mask |= int(VacuumEntityFeature.RETURN_HOME)
+        return _FeatureMask(mask)
 
     @property
     def status(self) -> str:
