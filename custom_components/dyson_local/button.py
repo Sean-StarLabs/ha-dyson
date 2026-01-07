@@ -22,14 +22,15 @@ async def async_setup_entry(
     device = hass.data[DOMAIN][DATA_DEVICES][config_entry.entry_id]
     name = config_entry.data[CONF_NAME]
 
-    # Cleanup: old "Clean Areas" entity is now merged into the smart Clean button.
+    # Cleanup: old robot clean buttons are now handled via the vacuum entity.
     # Remove the orphaned entity registry entry so it doesn't linger as "unavailable".
     ent_reg = er.async_get(hass)
     removed: list[str] = []
     for entry in er.async_entries_for_config_entry(ent_reg, config_entry.entry_id):
         if entry.platform != DOMAIN:
             continue
-        if entry.unique_id.endswith("-clean-areas"):
+        unique_id = entry.unique_id or ""
+        if unique_id.endswith("-clean-areas") or unique_id.endswith("-clean-area"):
             ent_reg.async_remove(entry.entity_id)
             removed.append(entry.entity_id)
     if removed:
@@ -44,8 +45,6 @@ async def async_setup_entry(
     if hasattr(device, "filter_life"):
         entities.append(DysonFilterResetButton(device, name))
 
-    if callable(getattr(device, "clean", None)):
-        entities.append(DysonRobotCleanButton(device, name))
     if callable(getattr(device, "add_selected_zone", None)):
         entities.append(DysonRobotAddAreaButton(device, name))
     if callable(getattr(device, "clear_selected_zones", None)):
@@ -69,30 +68,6 @@ class DysonFilterResetButton(DysonEntity, ButtonEntity):
 
     def press(self) -> None:
         self._device.reset_filter()
-
-
-class DysonRobotCleanButton(DysonEntity, ButtonEntity):
-    """Smart clean: selected areas if any, else full clean."""
-
-    @property
-    def available(self) -> bool:
-        if bool(getattr(self._device, "has_fault", False)):
-            return False
-        # When a clean is running (or paused/returning), the Dyson app does not allow
-        # changing targets/strategy. Use the vacuum entity's pause/return-to-base controls.
-        return not bool(getattr(self._device, "is_clean_session_active", False))
-
-    @property
-    def sub_name(self) -> Optional[str]:
-        return "Clean"
-
-    @property
-    def sub_unique_id(self) -> str:
-        # Keep the old unique id for dashboard/automation stability.
-        return "clean-area"
-
-    def press(self) -> None:
-        self._device.clean()
 
 
 class DysonRobotAddAreaButton(DysonEntity, ButtonEntity):

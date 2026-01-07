@@ -325,6 +325,28 @@ class DysonCloudRobot(DysonCloudDevice):
             return []
         return [f for f in faults if isinstance(f, dict)]
 
+    def _fault_text_blob(self) -> str:
+        """Return an uppercase string containing best-effort fault details."""
+        try:
+            return json.dumps(
+                {
+                    "state": self._status.get("state"),
+                    "faults": self._status.get("faults"),
+                    "activeFaults": self._status.get("activeFaults"),
+                },
+                default=str,
+            ).upper()
+        except Exception:
+            return str(self._status.get("state") or "").upper()
+
+    def _fault_has(self, token: str, *needles: str) -> bool:
+        blob = self._fault_text_blob()
+        if token not in blob:
+            return False
+        if not needles:
+            return True
+        return any(n in blob for n in needles)
+
     @property
     def has_fault(self) -> bool:
         raw = self._state_upper()
@@ -408,6 +430,8 @@ class DysonCloudRobot(DysonCloudDevice):
             "bininstalled",
             "binFitted",
             "binfitted",
+            "binRemoved",
+            "binremoved",
         )
         if present is not None:
             return present
@@ -420,10 +444,11 @@ class DysonCloudRobot(DysonCloudDevice):
             if any(k in s for k in ("FITTED", "INSTALLED", "PRESENT")):
                 return True
 
-        # Some devices provide a richer faults object; fall back to activeFaults in string form.
-        faults_blob = json.dumps(self._status.get("faults") or self.active_faults, default=str).upper()
-        if "BIN" in faults_blob and any(k in faults_blob for k in ("MISSING", "NOT_FITTED", "NOT INSTALLED", "REMOVED")):
+        # Some devices only expose these via faults/activeFaults details.
+        if self._fault_has("BIN", "MISSING", "NOT_FITTED", "NOT INSTALLED", "REMOVED", "ABSENT"):
             return False
+        if self._fault_has("BIN", "FITTED", "INSTALLED", "PRESENT"):
+            return True
 
         # Unknown: assume present (don’t unnecessarily disable control).
         return True
@@ -454,8 +479,25 @@ class DysonCloudRobot(DysonCloudDevice):
         direct = self._status_bool("tilt", "tilted")
         if direct is not None:
             return direct
-        faults_blob = json.dumps(self._status.get("faults") or self.active_faults, default=str).upper()
-        return "TILT" in faults_blob
+        return self._fault_has("TILT")
+
+    @property
+    def fault_summary(self) -> str:
+        """Human-readable fault message suitable for HA UI."""
+        if not self.has_fault:
+            return ""
+        if not self.is_bin_present:
+            return "Bin removed"
+        if self._fault_has("FILTER", "MISSING", "NOT INSTALLED", "REMOVED", "ABSENT"):
+            return "Filter removed"
+        if self.tilt:
+            return "Robot tilted"
+        if self.fault_codes:
+            return f"Fault ({', '.join(self.fault_codes)})"
+        raw = self._state_upper()
+        if "USER_RECOVERABLE" in raw:
+            return "Fault (user action required)"
+        return "Fault"
 
     @property
     def current_power_mode(self) -> str:

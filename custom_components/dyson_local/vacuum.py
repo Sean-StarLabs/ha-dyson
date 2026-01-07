@@ -44,6 +44,9 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
     def _friendly_status(self, raw_state: str) -> str:
         raw = raw_state.upper()
         if "FAULT" in raw:
+            summary = str(getattr(self._device, "fault_summary", "") or "")
+            if summary:
+                return summary
             return "Fault (user action required)" if "USER" in raw else "Fault"
         if "PAUSED" in raw:
             return "Paused"
