@@ -13,6 +13,7 @@ from typing import Any, Optional, Protocol
 from homeassistant.config_entries import SOURCE_DISCOVERY, ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import Entity
 
 from .cloud.const import CONF_AUTH, CONF_REGION, DATA_ACCOUNT, DATA_DEVICES
@@ -51,6 +52,27 @@ class DysonDevice(Protocol):
 
     def add_message_listener(self, listener): ...
     def remove_message_listener(self, listener): ...
+
+
+def _cleanup_legacy_entities(hass: HomeAssistant, config_entry_id: str) -> None:
+    """Remove entities that are no longer created by this integration."""
+    ent_reg = er.async_get(hass)
+    removed: list[str] = []
+    for entry in er.async_entries_for_config_entry(ent_reg, config_entry_id):
+        if entry.platform != DOMAIN:
+            continue
+        unique_id = entry.unique_id or ""
+        # Legacy duplicate: global robot cleaning level is now controlled via the
+        # vacuum's fan-speed UI (VacuumEntityFeature.FAN_SPEED).
+        if unique_id.endswith("-cleaning-level"):
+            removed.append(entry.entity_id)
+            ent_reg.async_remove(entry.entity_id)
+
+    if removed:
+        _LOGGER.debug("Removed legacy entities from registry: %s", removed)
+        async_schedule_save = getattr(ent_reg, "async_schedule_save", None)
+        if callable(async_schedule_save):
+            async_schedule_save()
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -198,6 +220,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][DATA_DEVICES][entry.entry_id] = device
 
     platforms = PLATFORMS_ROBOT if info.category == "robot" else PLATFORMS_AIR
+    _cleanup_legacy_entities(hass, entry.entry_id)
     await hass.config_entries.async_forward_entry_setups(entry, platforms)
     return True
 

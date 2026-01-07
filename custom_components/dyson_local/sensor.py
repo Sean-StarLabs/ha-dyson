@@ -139,11 +139,19 @@ class DysonRobotSelectedAreasSensor(DysonSensor):
 
     @property
     def native_value(self) -> Optional[str]:
-        names = getattr(self._device, "selected_zone_names", None)
-        if not isinstance(names, list):
-            return None
-        cleaned = [str(v) for v in names if isinstance(v, str) and v]
-        return ", ".join(cleaned) if cleaned else None
+        selected = getattr(self._device, "selected_zone_descriptions", None)
+        if isinstance(selected, list):
+            cleaned = [str(v) for v in selected if isinstance(v, str) and v]
+        else:
+            cleaned = []
+
+        if not cleaned:
+            strategy = getattr(self._device, "current_power_mode", None)
+            if isinstance(strategy, str) and strategy:
+                return f"All ({strategy.capitalize()})"
+            return "All"
+
+        return ", ".join(cleaned)
 
 
 class DysonRobotSelectedDustEstimateSensor(DysonSensor):

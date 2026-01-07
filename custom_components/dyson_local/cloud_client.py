@@ -259,6 +259,40 @@ class DysonCloudClient:
         if not isinstance(payload, list):
             raise ValueError("Unexpected Dyson persistent map metadata response (expected list)")
 
+        async def _maybe_fill_from_persistent_map(
+            map_id: str, existing: DysonPersistentMapMetadata
+        ) -> DysonPersistentMapMetadata:
+            # Some devices/accounts return incomplete metadata (e.g. empty zones/zoneProperties).
+            # Fall back to fetching the full persistent map definition and extract zones.
+            if existing.zones:
+                return existing
+
+            try:
+                zones_def = await self.async_get_persistent_map_zones_definition(
+                    serial_number, map_id
+                )
+            except ClientResponseError:
+                return existing
+            except Exception:
+                return existing
+
+            if not zones_def:
+                return existing
+
+            name = existing.name or zones_def.get("name")
+            zones_definition_last_updated_date = (
+                existing.zones_definition_last_updated_date
+                or zones_def.get("zones_definition_last_updated_date")
+            )
+            zones = existing.zones or zones_def.get("zones") or []
+            return DysonPersistentMapMetadata(
+                id=existing.id,
+                name=name,
+                last_visited=existing.last_visited,
+                zones_definition_last_updated_date=zones_definition_last_updated_date,
+                zones=zones,
+            )
+
         maps: list[DysonPersistentMapMetadata] = []
         for raw_map in payload:
             if not isinstance(raw_map, dict):
@@ -286,19 +320,65 @@ class DysonCloudClient:
             if not map_id:
                 continue
 
-            maps.append(
-                DysonPersistentMapMetadata(
-                    id=map_id,
-                    name=_as_optional_str(raw_map.get("name")),
-                    last_visited=_as_optional_str(raw_map.get("lastVisited")),
-                    zones_definition_last_updated_date=_as_optional_str(
-                        raw_map.get("zonesDefinitionLastUpdatedDate")
-                    ),
-                    zones=zones,
-                )
+            meta = DysonPersistentMapMetadata(
+                id=map_id,
+                name=_as_optional_str(raw_map.get("name")),
+                last_visited=_as_optional_str(raw_map.get("lastVisited")),
+                zones_definition_last_updated_date=_as_optional_str(
+                    raw_map.get("zonesDefinitionLastUpdatedDate")
+                ),
+                zones=zones,
             )
+            meta = await _maybe_fill_from_persistent_map(map_id, meta)
+            maps.append(meta)
 
         return maps
+
+    async def async_get_persistent_map_zones_definition(
+        self, serial_number: str, map_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Fetch a full persistent map and return a simplified zonesDefinition.
+
+        Endpoint: GET /v1/app/{serial}/persistent-maps/{uuid}
+        """
+
+        url = f"{self._base_url}/v1/app/{serial_number}/persistent-maps/{map_id}"
+        async with self._session.get(url, headers=self._headers()) as resp:
+            resp.raise_for_status()
+            payload = await resp.json(content_type=None)
+
+        if not isinstance(payload, dict):
+            return None
+
+        zones_def = payload.get("zonesDefinition")
+        if not isinstance(zones_def, dict):
+            return None
+
+        zones_raw = zones_def.get("zones")
+        zones: list[DysonPersistentMapZone] = []
+        if isinstance(zones_raw, list):
+            for raw_zone in zones_raw:
+                if not isinstance(raw_zone, dict):
+                    continue
+                zone_id = _as_str(raw_zone.get("id"))
+                if not zone_id:
+                    continue
+                zones.append(
+                    DysonPersistentMapZone(
+                        id=zone_id,
+                        name=_as_str(raw_zone.get("name")) or zone_id,
+                        area=_as_optional_float(raw_zone.get("area")),
+                        icon=_as_optional_str(raw_zone.get("icon")),
+                    )
+                )
+
+        return {
+            "name": _as_optional_str(zones_def.get("persistentMapName")),
+            "zones_definition_last_updated_date": _as_optional_str(
+                zones_def.get("lastUpdatedDate")
+            ),
+            "zones": zones,
+        }
 
     async def async_get_recommended_cleans(
         self, serial_number: str
@@ -349,3 +429,24 @@ class DysonCloudClient:
                 zones[zone_id] = dust_mg_total
 
         return out
+
+    async def async_set_zone_behaviour(
+        self,
+        serial_number: str,
+        *,
+        map_id: str,
+        zone_id: str,
+        cleaning_strategy: str,
+    ) -> None:
+        """Set the cleaning strategy for a single zone (360 Vis Nav only).
+
+        Endpoint: PUT /v1/app/{serial}/persistent-maps/{mapId}/zones/{zoneId}/behaviour
+        Body: { cleaningStrategy: 'auto'|'quick'|'quiet'|'boost' }
+        """
+
+        url = (
+            f"{self._base_url}/v1/app/{serial_number}/persistent-maps/{map_id}/zones/{zone_id}/behaviour"
+        )
+        body = {"cleaningStrategy": str(cleaning_strategy)}
+        async with self._session.put(url, headers=self._headers(), json=body) as resp:
+            resp.raise_for_status()

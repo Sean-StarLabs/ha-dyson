@@ -13,10 +13,12 @@ import json
 import logging
 import time
 from typing import Any, Callable, Optional
+from concurrent.futures import Future
 
 from aiohttp import ClientResponseError
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 
 from libdyson import MessageType
 
@@ -172,10 +174,41 @@ class DysonCloudRobot(DysonCloudDevice):
         self._dust_by_map: dict[str, dict[str, float]] = {}
         self._last_dust_refresh = 0.0
         self._seen_current_state = False
+        self._zone_strategy_by_map: dict[str, dict[str, str]] = {}
+        self._store = Store(
+            hass,
+            version=1,
+            key=f"dyson_local.{info.serial}.zone_strategies",
+        )
 
     async def async_start(self) -> None:
+        await self._async_load_zone_strategies()
         await super().async_start()
         self._hass.async_create_task(self.async_refresh_maps())
+
+    async def _async_load_zone_strategies(self) -> None:
+        try:
+            data = await self._store.async_load()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Failed to load zone strategies for %s", self._info.serial)
+            return
+        if not isinstance(data, dict):
+            return
+        out: dict[str, dict[str, str]] = {}
+        for map_id, zones in data.items():
+            if not isinstance(map_id, str) or not isinstance(zones, dict):
+                continue
+            z_out: dict[str, str] = {}
+            for zone_id, strategy in zones.items():
+                if isinstance(zone_id, str) and isinstance(strategy, str) and strategy:
+                    z_out[zone_id] = strategy
+            if z_out:
+                out[map_id] = z_out
+        self._zone_strategy_by_map = out
+
+    def _run_coro_threadsafe(self, coro) -> Future:
+        """Run a coroutine from any thread against HA's event loop."""
+        return asyncio.run_coroutine_threadsafe(coro, self._hass.loop)
 
     async def async_refresh_maps(self) -> None:
         """Fetch persistent map metadata to enable zone/area controls in HA."""
@@ -220,8 +253,6 @@ class DysonCloudRobot(DysonCloudDevice):
             zones = self._zones_for_map(self._selected_map_id)
             if zones:
                 self._selected_zone_id = zones[0].id
-                if not self._selected_zone_ids:
-                    self._selected_zone_ids = [zones[0].id]
 
         _LOGGER.debug(
             "Robot %s loaded %d persistent maps (selected_map=%s selected_zone=%s)",
@@ -318,6 +349,12 @@ class DysonCloudRobot(DysonCloudDevice):
             }
         )
 
+    def _start_cleaning_strategy(self) -> Optional[str]:
+        strategy = self.current_power_mode
+        if isinstance(strategy, str) and strategy:
+            return strategy
+        return None
+
     def _map_display_name(self, m: DysonPersistentMapMetadata) -> str:
         return m.name or m.id
 
@@ -344,7 +381,7 @@ class DysonCloudRobot(DysonCloudDevice):
         self._selected_map_id = map_id
         zones = self._zones_for_map(map_id)
         self._selected_zone_id = zones[0].id if zones else None
-        self._selected_zone_ids = [self._selected_zone_id] if self._selected_zone_id else []
+        self._selected_zone_ids = []
         self._emit(MessageType.STATE)
 
     @property
@@ -368,6 +405,10 @@ class DysonCloudRobot(DysonCloudDevice):
         if not any(z.id == zone_id for z in zones):
             raise ValueError(f"Unknown zone id: {zone_id}")
         self._selected_zone_id = zone_id
+        # If nothing is selected yet, selecting an area should select it.
+        # Otherwise, treat the selection as a "cursor" for the Add Area button.
+        if not self._selected_zone_ids:
+            self._selected_zone_ids = [zone_id]
         self._emit(MessageType.STATE)
 
     @property
@@ -376,7 +417,72 @@ class DysonCloudRobot(DysonCloudDevice):
 
     def clear_selected_zones(self) -> None:
         self._selected_zone_ids = []
+        self._selected_zone_id = None
         self._emit(MessageType.STATE)
+
+    def clear_zone_cursor(self) -> None:
+        """Clear the currently selected zone (used for 'All')."""
+        self._selected_zone_id = None
+        self._emit(MessageType.STATE)
+
+    def get_zone_cleaning_strategy(self, map_id: str, zone_id: str) -> Optional[str]:
+        zones = self._zone_strategy_by_map.get(map_id)
+        if not isinstance(zones, dict):
+            return None
+        strategy = zones.get(zone_id)
+        return strategy if isinstance(strategy, str) and strategy else None
+
+    def set_zone_cleaning_strategy(self, map_id: str, zone_id: str, strategy: str) -> None:
+        # This method is called from entity methods that may run in executor threads.
+        # Ensure we only touch HA async APIs on the event loop.
+        self._run_coro_threadsafe(
+            self._async_set_zone_cleaning_strategy(map_id, zone_id, strategy)
+        )
+
+    async def _async_set_zone_cleaning_strategy(self, map_id: str, zone_id: str, strategy: str) -> None:
+        strategy = str(strategy)
+        if not strategy:
+            return
+        zones = self._zone_strategy_by_map.setdefault(map_id, {})
+        zones[zone_id] = strategy
+        try:
+            await self._store.async_save(self._zone_strategy_by_map)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Failed to save zone strategies for %s: %s", self._info.serial, err)
+        try:
+            await self._cloud.async_set_zone_behaviour(
+                self._info.serial, map_id=map_id, zone_id=zone_id, cleaning_strategy=strategy
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Failed to set zone behaviour for %s: %s", self._info.serial, err)
+        self._emit(MessageType.STATE)
+
+    @property
+    def selected_zone_effective_strategy(self) -> Optional[str]:
+        map_id = self._selected_map_id or str(self._status.get("persistentMapId") or "")
+        zone_id = self._selected_zone_id
+        if not isinstance(map_id, str) or not map_id or not isinstance(zone_id, str) or not zone_id:
+            return None
+        return self.get_zone_cleaning_strategy(map_id, zone_id) or self._start_cleaning_strategy()
+
+    @property
+    def selected_zone_descriptions(self) -> list[str]:
+        """Selected zones with effective strategy for display."""
+        map_id = self._selected_map_id or str(self._status.get("persistentMapId") or "")
+        if not isinstance(map_id, str) or not map_id:
+            return []
+        default_strategy = self._start_cleaning_strategy()
+        out: list[str] = []
+        for zone_id in self._selected_zone_ids:
+            if not isinstance(zone_id, str) or not zone_id:
+                continue
+            name = self._zone_name(zone_id) or zone_id
+            strategy = self.get_zone_cleaning_strategy(map_id, zone_id) or default_strategy
+            if isinstance(strategy, str) and strategy:
+                out.append(f"{name} ({strategy.capitalize()})")
+            else:
+                out.append(name)
+        return out
 
     def add_selected_zone(self, zone_id: Optional[str] = None) -> None:
         """Add a zone to the multi-zone selection list."""
@@ -458,20 +564,22 @@ class DysonCloudRobot(DysonCloudDevice):
             _LOGGER.warning("Robot %s selected map %s not found", self._info.serial, map_id)
             return
 
+        _LOGGER.info(
+            "Robot %s starting zone clean map=%s zone=%s (%s)",
+            self._info.serial,
+            map_meta.id,
+            zone_id,
+            self._zone_name(zone_id) or zone_id,
+        )
+
         cleaning_programme = {
             "orderedZones": [],
             "persistentMapId": map_meta.id,
             "unorderedZones": [zone_id],
             "zonesDefinitionLastUpdatedDate": map_meta.zones_definition_last_updated_date,
         }
-        self._publish(
-            {
-                "msg": "START",
-                "mode-reason": "LAPP",
-                "fullCleanType": "immediate",
-                "cleaningMode": "zoneConfigured",
-                "cleaningProgramme": cleaning_programme,
-            }
+        self._run_coro_threadsafe(
+            self._async_start_zone_clean(map_meta.id, [zone_id], cleaning_programme)
         )
 
     def clean_selected_zones(self) -> None:
@@ -505,21 +613,69 @@ class DysonCloudRobot(DysonCloudDevice):
             )
             return
 
+        _LOGGER.info(
+            "Robot %s starting multi-zone clean map=%s zones=%s",
+            self._info.serial,
+            map_meta.id,
+            [self._zone_name(z) or z for z in zones],
+        )
+
         cleaning_programme = {
             "orderedZones": [],
             "persistentMapId": map_meta.id,
             "unorderedZones": zones,
             "zonesDefinitionLastUpdatedDate": map_meta.zones_definition_last_updated_date,
         }
-        self._publish(
-            {
-                "msg": "START",
-                "mode-reason": "LAPP",
-                "fullCleanType": "immediate",
-                "cleaningMode": "zoneConfigured",
-                "cleaningProgramme": cleaning_programme,
-            }
+        self._run_coro_threadsafe(
+            self._async_start_zone_clean(map_meta.id, zones, cleaning_programme)
         )
+
+    async def _async_start_zone_clean(
+        self, map_id: str, zone_ids: list[str], cleaning_programme: dict[str, Any]
+    ) -> None:
+        # Apply per-zone strategies (best-effort) before starting the clean.
+        strategies = self._zone_strategy_by_map.get(map_id, {})
+        tasks: list[asyncio.Task] = []
+        if isinstance(strategies, dict):
+            for zone_id in zone_ids:
+                strategy = strategies.get(zone_id)
+                if isinstance(strategy, str) and strategy:
+                    tasks.append(
+                        self._hass.async_create_task(
+                            self._cloud.async_set_zone_behaviour(
+                                self._info.serial,
+                                map_id=map_id,
+                                zone_id=zone_id,
+                                cleaning_strategy=strategy,
+                            )
+                        )
+                    )
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    _LOGGER.debug(
+                        "Robot %s zone behaviour update failed: %s",
+                        self._info.serial,
+                        result,
+                    )
+
+        # Start the clean.
+        msg: dict[str, Any] = {
+            "msg": "START",
+            "mode-reason": "LAPP",
+            "fullCleanType": "immediate",
+            "cleaningMode": "zoneConfigured",
+            "cleaningProgramme": cleaning_programme,
+        }
+        self._publish(msg)
+
+    def clean(self) -> None:
+        """Smart clean: if areas selected, clean those; otherwise clean everything."""
+        if self._selected_zone_ids:
+            self.clean_selected_zones()
+            return
+        self.start()
 
     @property
     def position(self) -> Any:
@@ -527,15 +683,26 @@ class DysonCloudRobot(DysonCloudDevice):
 
     # Commands used by HA vacuum entity
     def start(self) -> None:
-        self._publish({"msg": "START", "mode-reason": "LAPP", "fullCleanType": "immediate"})
+        _LOGGER.info("Robot %s START (full clean)", self._info.serial)
+        msg: dict[str, Any] = {"msg": "START", "mode-reason": "LAPP", "fullCleanType": "immediate"}
+        # Mirror Dyson/matterbridge behavior: include cleaningMode/Strategy for modern robots.
+        if self._status.get("defaultCleaningMode") is not None:
+            msg["cleaningMode"] = "global"
+        strategy = self._start_cleaning_strategy()
+        if self._status.get("defaultCleaningStrategy") is not None and strategy:
+            msg["cleaningStrategy"] = strategy
+        self._publish(msg)
 
     def pause(self) -> None:
+        _LOGGER.info("Robot %s PAUSE", self._info.serial)
         self._publish({"msg": "PAUSE", "mode-reason": "LAPP"})
 
     def resume(self) -> None:
+        _LOGGER.info("Robot %s RESUME", self._info.serial)
         self._publish({"msg": "RESUME", "mode-reason": "LAPP"})
 
     def abort(self) -> None:
+        _LOGGER.info("Robot %s ABORT", self._info.serial)
         self._publish({"msg": "ABORT", "mode-reason": "LAPP"})
 
     def _on_message(self, topic: str, payload: bytes) -> None:
@@ -552,13 +719,19 @@ class DysonCloudRobot(DysonCloudDevice):
         msg_type = msg.get("msg")
         if msg_type == "STATE-CHANGE":
             # Convert state-change format to current-state like the Matterbridge plugin does.
+            def _get(*keys: str) -> Any:
+                for k in keys:
+                    if k in msg:
+                        return msg.get(k)
+                return None
+
             msg = {
                 **{k: v for k, v in msg.items() if not str(k).startswith("old")},
                 "msg": "CURRENT-STATE",
-                "state": msg.get("newstate") or msg.get("state"),
-                "activeFaults": msg.get("newActiveFaults") or msg.get("activeFaults"),
-                "outOfBoxState": msg.get("newOutOfBoxState") or msg.get("outOfBoxState"),
-                "zoneId": msg.get("newZoneId") or msg.get("zoneId"),
+                "state": _get("newstate", "newState", "state"),
+                "activeFaults": _get("newActiveFaults", "newactivefaults", "activeFaults"),
+                "outOfBoxState": _get("newOutOfBoxState", "newoutofboxstate", "outOfBoxState"),
+                "zoneId": _get("newZoneId", "newzoneid", "zoneId", "zoneid"),
             }
             msg_type = "CURRENT-STATE"
 

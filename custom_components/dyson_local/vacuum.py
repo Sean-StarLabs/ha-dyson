@@ -108,7 +108,10 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
         if self.activity == VacuumActivity.PAUSED:
             self._device.resume()
         else:
-            self._device.start()
+            if callable(getattr(self._device, "clean", None)):
+                self._device.clean()
+            else:
+                self._device.start()
 
     def pause(self) -> None:
         self._device.pause()
