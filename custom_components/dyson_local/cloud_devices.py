@@ -315,19 +315,147 @@ class DysonCloudRobot(DysonCloudDevice):
         except Exception:
             return 0
 
+    def _state_upper(self) -> str:
+        return self.state.upper()
+
+    @property
+    def active_faults(self) -> list[dict[str, Any]]:
+        faults = self._status.get("activeFaults")
+        if not isinstance(faults, list):
+            return []
+        return [f for f in faults if isinstance(f, dict)]
+
+    @property
+    def has_fault(self) -> bool:
+        raw = self._state_upper()
+        if "FAULT" in raw:
+            return True
+        return len(self.active_faults) > 0
+
+    @property
+    def fault_codes(self) -> list[str]:
+        out: list[str] = []
+        for f in self.active_faults:
+            code = f.get("faultCode")
+            if code is None:
+                continue
+            out.append(str(code))
+        return out
+
     @property
     def is_charging(self) -> bool:
         state = str(self._status.get("state") or "")
         return "CHARG" in state or "DOCK" in state
 
     @property
+    def is_paused(self) -> bool:
+        return "PAUSED" in self._state_upper()
+
+    @property
+    def is_returning(self) -> bool:
+        raw = self._state_upper()
+        return "ABORT" in raw or "RETURN" in raw
+
+    @property
+    def is_clean_session_active(self) -> bool:
+        """True when the robot is in any cleaning session (including charging-for-clean)."""
+        raw = self._state_upper()
+        if self.is_paused or self.is_returning:
+            return True
+        return any(k in raw for k in ("CLEAN", "RUN", "TRAVERS", "DISCOVER", "MAPPING"))
+
+    @property
+    def is_config_locked(self) -> bool:
+        """True when the Dyson app would not allow changing area/strategy selections."""
+        return self.has_fault or self.is_clean_session_active
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(int(value))
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("1", "true", "yes", "on"):
+                return True
+            if v in ("0", "false", "no", "off"):
+                return False
+        return None
+
+    def _status_bool(self, *keys: str) -> Optional[bool]:
+        for k in keys:
+            if k in self._status:
+                coerced = self._coerce_bool(self._status.get(k))
+                if coerced is not None:
+                    return coerced
+        return None
+
+    def _status_str(self, *keys: str) -> Optional[str]:
+        for k in keys:
+            v = self._status.get(k)
+            if isinstance(v, str) and v:
+                return v
+        return None
+
+    @property
+    def is_bin_present(self) -> bool:
+        # Best-effort: different models report different keys.
+        present = self._status_bool(
+            "binPresent",
+            "binpresent",
+            "binInstalled",
+            "bininstalled",
+            "binFitted",
+            "binfitted",
+        )
+        if present is not None:
+            return present
+
+        state = self._status_str("binState", "binstate")
+        if state:
+            s = state.upper()
+            if any(k in s for k in ("NOT_FITTED", "NOT_INSTALLED", "MISSING", "REMOVED", "ABSENT")):
+                return False
+            if any(k in s for k in ("FITTED", "INSTALLED", "PRESENT")):
+                return True
+
+        # Some devices provide a richer faults object; fall back to activeFaults in string form.
+        faults_blob = json.dumps(self._status.get("faults") or self.active_faults, default=str).upper()
+        if "BIN" in faults_blob and any(k in faults_blob for k in ("MISSING", "NOT_FITTED", "NOT INSTALLED", "REMOVED")):
+            return False
+
+        # Unknown: assume present (don’t unnecessarily disable control).
+        return True
+
+    @property
     def is_bin_full(self) -> bool:
-        # Not currently exposed via MQTT in a uniform way across models.
-        return False
+        full = self._status_bool(
+            "binFull",
+            "binfull",
+            "dustBinFull",
+            "dustbinfull",
+            "binIsFull",
+            "binisfull",
+        )
+        if full is not None:
+            return full
+
+        faults_blob = json.dumps(self._status.get("faults") or self.active_faults, default=str).upper()
+        return "BIN_FULL" in faults_blob or "BIN FULL" in faults_blob
 
     @property
     def state(self) -> str:
         return str(self._status.get("state") or "UNKNOWN")
+
+    @property
+    def tilt(self) -> bool:
+        # Best-effort: some models report a dedicated key; others only via fault data.
+        direct = self._status_bool("tilt", "tilted")
+        if direct is not None:
+            return direct
+        faults_blob = json.dumps(self._status.get("faults") or self.active_faults, default=str).upper()
+        return "TILT" in faults_blob
 
     @property
     def current_power_mode(self) -> str:
@@ -348,6 +476,30 @@ class DysonCloudRobot(DysonCloudDevice):
                 "defaults": {"defaultCleaningStrategy": strategy},
             }
         )
+
+    @property
+    def can_start(self) -> bool:
+        # Dyson app blocks control when faults are present or bin is not fitted.
+        if self.has_fault or not self.is_bin_present:
+            return False
+        # START is also used as RESUME when paused.
+        if self.is_paused:
+            return True
+        # Only allow starting from idle/docked states.
+        return not self.is_clean_session_active
+
+    @property
+    def can_pause(self) -> bool:
+        if self.has_fault:
+            return False
+        return self.is_clean_session_active and not self.is_paused
+
+    @property
+    def can_return_to_base(self) -> bool:
+        if self.has_fault:
+            return False
+        # Return-to-base is only meaningful during a cleaning session.
+        return self.is_clean_session_active
 
     def _start_cleaning_strategy(self) -> Optional[str]:
         strategy = self.current_power_mode
@@ -514,6 +666,18 @@ class DysonCloudRobot(DysonCloudDevice):
         if isinstance(zone_id, str) and zone_id:
             return self._zone_name(zone_id) or zone_id
         return None
+
+    @property
+    def dust_by_zone_mg(self) -> dict[str, float]:
+        map_id = self._selected_map_id or str(self._status.get("persistentMapId") or "")
+        dust_by_zone = self._dust_by_map.get(map_id)
+        if not isinstance(dust_by_zone, dict):
+            return {}
+        out: dict[str, float] = {}
+        for zone_id, weight in dust_by_zone.items():
+            if isinstance(zone_id, str) and zone_id and isinstance(weight, (int, float)):
+                out[zone_id] = float(weight)
+        return out
 
     @property
     def selected_zone_names(self) -> list[str]:

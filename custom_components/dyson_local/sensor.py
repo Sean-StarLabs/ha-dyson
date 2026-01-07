@@ -127,7 +127,11 @@ class DysonRobotCurrentAreaSensor(DysonSensor):
     @property
     def native_value(self) -> Optional[str]:
         value = getattr(self._device, "current_zone_name", None)
-        return str(value) if isinstance(value, str) and value else None
+        if isinstance(value, str) and value:
+            return value
+        if bool(getattr(self._device, "is_clean_session_active", False)):
+            return "Unknown"
+        return "None"
 
 
 class DysonRobotSelectedAreasSensor(DysonSensor):
@@ -153,12 +157,31 @@ class DysonRobotSelectedAreasSensor(DysonSensor):
 
         return ", ".join(cleaned)
 
+    @property
+    def extra_state_attributes(self) -> dict:
+        # Expose per-area dust predictions as attributes so the UI can display them.
+        dust_by_zone = getattr(self._device, "dust_by_zone_mg", None)
+        if not isinstance(dust_by_zone, dict):
+            dust_by_zone = {}
+
+        zones = dict(getattr(self._device, "zones", []) or [])
+        dust_by_area: dict[str, float] = {}
+        for zone_id, mg in dust_by_zone.items():
+            if isinstance(zone_id, str) and isinstance(mg, (int, float)):
+                dust_by_area[zones.get(zone_id, zone_id)] = float(mg)
+
+        return {
+            "selected_zone_ids": list(getattr(self._device, "selected_zone_ids", []) or []),
+            "selected_map_id": getattr(self._device, "selected_map_id", None),
+            "dust_by_area_mg": dust_by_area,
+        }
+
 
 class DysonRobotSelectedDustEstimateSensor(DysonSensor):
     """Estimated dust load for currently selected zones (Vis Nav)."""
 
     _SENSOR_TYPE = "selected_dust_mg"
-    _SENSOR_NAME = "Selected Dust"
+    _SENSOR_NAME = "Dust Estimate"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_native_unit_of_measurement = "mg"
 
@@ -166,6 +189,24 @@ class DysonRobotSelectedDustEstimateSensor(DysonSensor):
     def native_value(self) -> Optional[float]:
         value = getattr(self._device, "selected_zones_dust_mg", None)
         return float(value) if isinstance(value, (int, float)) else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        dust_by_zone = getattr(self._device, "dust_by_zone_mg", None)
+        if not isinstance(dust_by_zone, dict):
+            dust_by_zone = {}
+        zones = dict(getattr(self._device, "zones", []) or [])
+        dust_by_area: dict[str, float] = {}
+        for zone_id, mg in dust_by_zone.items():
+            if isinstance(zone_id, str) and isinstance(mg, (int, float)):
+                dust_by_area[zones.get(zone_id, zone_id)] = float(mg)
+
+        return {
+            "selected_map_id": getattr(self._device, "selected_map_id", None),
+            "selected_zone_ids": list(getattr(self._device, "selected_zone_ids", []) or []),
+            "dust_by_zone_mg": {k: float(v) for k, v in dust_by_zone.items() if isinstance(v, (int, float))},
+            "dust_by_area_mg": dust_by_area,
+        }
 
 
 class DysonRobotLastMessageTimeSensor(DysonSensor):

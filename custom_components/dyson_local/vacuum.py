@@ -1,6 +1,6 @@
 """Vacuum platform for Dyson (cloud-only)."""
 
-from typing import Any, Callable, List, Mapping
+from typing import Any, Callable, Mapping
 
 from homeassistant.components.vacuum import (
     ATTR_STATUS,
@@ -11,6 +11,7 @@ from homeassistant.components.vacuum import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from . import DysonEntity
 from .const import DATA_DEVICES, DOMAIN
@@ -19,19 +20,8 @@ SUPPORTED_FEATURES = (
     VacuumEntityFeature.START
     | VacuumEntityFeature.PAUSE
     | VacuumEntityFeature.RETURN_HOME
-    | VacuumEntityFeature.FAN_SPEED
     | VacuumEntityFeature.STATUS
-    | VacuumEntityFeature.STATE
 )
-
-FAN_SPEED_LIST = ["Auto", "Quick", "Quiet", "Boost"]
-FAN_SPEED_TO_STRATEGY = {
-    "Auto": "auto",
-    "Quick": "quick",
-    "Quiet": "quiet",
-    "Boost": "boost",
-}
-STRATEGY_TO_FAN_SPEED = {v: k for k, v in FAN_SPEED_TO_STRATEGY.items()}
 
 ATTR_POSITION = "position"
 
@@ -48,24 +38,60 @@ async def async_setup_entry(
 class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
     """Dyson robot vacuum entity (cloud-only)."""
 
+    def _raw_state(self) -> str:
+        return str(getattr(self._device, "state", "UNKNOWN"))
+
+    def _friendly_status(self, raw_state: str) -> str:
+        raw = raw_state.upper()
+        if "FAULT" in raw:
+            return "Fault (user action required)" if "USER" in raw else "Fault"
+        if "PAUSED" in raw:
+            return "Paused"
+        if "CLEAN" in raw and "CHARG" in raw:
+            return "Charging to continue cleaning"
+        if "CHARG" in raw:
+            return "Charging"
+        if "DOCK" in raw or "INACTIVE" in raw:
+            return "Docked"
+        if "RETURN" in raw or "ABORT" in raw:
+            return "Returning to dock"
+        if "RUN" in raw or "CLEAN" in raw or "TRAVERS" in raw or "DISCOVER" in raw or "MAPPING" in raw:
+            return "Cleaning"
+        return raw_state
+
     @property
     def available(self) -> bool:
         return self._device.is_connected
 
     @property
     def supported_features(self) -> int:
-        return SUPPORTED_FEATURES
+        # Features should reflect what the Dyson app allows at this moment.
+        if bool(getattr(self._device, "has_fault", False)):
+            return VacuumEntityFeature.STATUS
+
+        features = VacuumEntityFeature.STATUS
+        if bool(getattr(self._device, "can_start", True)):
+            features |= VacuumEntityFeature.START
+        if bool(getattr(self._device, "can_pause", True)):
+            features |= VacuumEntityFeature.PAUSE
+        if bool(getattr(self._device, "can_return_to_base", True)):
+            features |= VacuumEntityFeature.RETURN_HOME
+        return int(features)
 
     @property
     def status(self) -> str:
-        return str(getattr(self._device, "state", "UNKNOWN"))
+        return self._friendly_status(self._raw_state())
 
     @property
     def activity(self) -> VacuumActivity:
-        raw = self.status.upper()
+        raw = self._raw_state().upper()
         if "FAULT" in raw:
             return VacuumActivity.ERROR
         if "PAUSED" in raw:
+            return VacuumActivity.PAUSED
+        # Some models report that they are charging during a clean (e.g. "FULL_CLEAN_CHARGING").
+        # Treat it as paused/charging rather than docked/idle.
+        if "CLEAN" in raw and "CHARG" in raw:
             return VacuumActivity.PAUSED
         if "ABORT" in raw or "RETURN" in raw:
             return VacuumActivity.RETURNING
@@ -76,35 +102,24 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
         return VacuumActivity.DOCKED
 
     @property
-    def state(self) -> str:
-        # Backwards compatible state string for older HA consumers.
-        # Prefer `activity` in new HA versions.
-        return self.activity.value
-
-    @property
     def extra_state_attributes(self) -> Mapping[str, Any]:
         return {
             ATTR_POSITION: str(getattr(self._device, "position", "")),
             ATTR_STATUS: self.status,
+            "dyson_state": self._raw_state(),
             "current_area": getattr(self._device, "current_zone_name", None),
             "selected_areas": getattr(self._device, "selected_zone_names", None),
+            "has_fault": bool(getattr(self._device, "has_fault", False)),
+            "fault_codes": getattr(self._device, "fault_codes", []),
+            "bin_present": bool(getattr(self._device, "is_bin_present", True)),
+            "tilt": bool(getattr(self._device, "tilt", False)),
         }
 
-    @property
-    def fan_speed(self) -> str:
-        strategy = str(getattr(self._device, "current_power_mode", "auto"))
-        return STRATEGY_TO_FAN_SPEED.get(strategy, "Auto")
-
-    @property
-    def fan_speed_list(self) -> List[str]:
-        return FAN_SPEED_LIST
-
-    def set_fan_speed(self, fan_speed: str, **kwargs) -> None:
-        strategy = FAN_SPEED_TO_STRATEGY.get(fan_speed)
-        if strategy:
-            self._device.set_default_cleaning_strategy(strategy)
-
     def start(self) -> None:
+        if bool(getattr(self._device, "has_fault", False)):
+            raise HomeAssistantError(f"Dyson reports a fault: {self.status}")
+        if not bool(getattr(self._device, "can_start", True)):
+            raise HomeAssistantError(f"Dyson cannot start right now: {self.status}")
         if self.activity == VacuumActivity.PAUSED:
             self._device.resume()
         else:
@@ -114,7 +129,15 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
                 self._device.start()
 
     def pause(self) -> None:
+        if bool(getattr(self._device, "has_fault", False)):
+            raise HomeAssistantError(f"Dyson reports a fault: {self.status}")
+        if not bool(getattr(self._device, "can_pause", True)):
+            raise HomeAssistantError(f"Dyson cannot pause right now: {self.status}")
         self._device.pause()
 
     def return_to_base(self, **kwargs) -> None:
+        if bool(getattr(self._device, "has_fault", False)):
+            raise HomeAssistantError(f"Dyson reports a fault: {self.status}")
+        if not bool(getattr(self._device, "can_return_to_base", True)):
+            raise HomeAssistantError(f"Dyson cannot return to base right now: {self.status}")
         self._device.abort()

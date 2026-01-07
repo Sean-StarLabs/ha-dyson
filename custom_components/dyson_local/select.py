@@ -108,6 +108,10 @@ class DysonRobotMapSelect(DysonEntity, SelectEntity):
     _attr_entity_category = EntityCategory.CONFIG
 
     @property
+    def available(self) -> bool:
+        return not bool(getattr(self._device, "is_config_locked", False))
+
+    @property
     def options(self) -> list[str]:
         maps = list(getattr(self._device, "maps", []) or [])
         labelled = _make_unique_labels([(m_id, m_name) for m_id, m_name in maps])
@@ -152,6 +156,10 @@ class DysonRobotAreaSelect(DysonEntity, SelectEntity):
     # This is an active control used for cleaning, not just configuration.
     _attr_entity_category = None
     _ALL = "All"
+
+    @property
+    def available(self) -> bool:
+        return not bool(getattr(self._device, "is_config_locked", False))
 
     @property
     def options(self) -> list[str]:
@@ -214,24 +222,34 @@ class DysonRobotAreaLevelSelect(DysonEntity, SelectEntity):
 
     @property
     def available(self) -> bool:
-        # Only meaningful when an area is selected (not "All").
-        zone_id = getattr(self._device, "selected_zone_id", None)
-        return isinstance(zone_id, str) and bool(zone_id)
+        if bool(getattr(self._device, "is_config_locked", False)):
+            return False
+        # Also used to set the global strategy when Area=All.
+        return True
 
     @property
     def current_option(self) -> Optional[str]:
-        strategy = getattr(self._device, "selected_zone_effective_strategy", None)
+        zone_id = getattr(self._device, "selected_zone_id", None)
+        if not isinstance(zone_id, str) or not zone_id:
+            strategy = getattr(self._device, "current_power_mode", None)
+        else:
+            strategy = getattr(self._device, "selected_zone_effective_strategy", None)
         if not isinstance(strategy, str) or not strategy:
             return "Auto"
         return ROBOT_STRATEGY_ENUM_TO_STR.get(strategy, "Auto")
 
     def select_option(self, option: str) -> None:
-        map_id = getattr(self._device, "selected_map_id", None)
         zone_id = getattr(self._device, "selected_zone_id", None)
-        if not isinstance(map_id, str) or not map_id or not isinstance(zone_id, str) or not zone_id:
-            return
         strategy = ROBOT_STRATEGY_STR_TO_ENUM.get(option)
         if not strategy:
+            return
+        if not isinstance(zone_id, str) or not zone_id:
+            # Area=All -> set global default strategy.
+            if callable(getattr(self._device, "set_default_cleaning_strategy", None)):
+                self._device.set_default_cleaning_strategy(strategy)
+            return
+        map_id = getattr(self._device, "selected_map_id", None)
+        if not isinstance(map_id, str) or not map_id:
             return
         if callable(getattr(self._device, "set_zone_cleaning_strategy", None)):
             self._device.set_zone_cleaning_strategy(map_id, zone_id, strategy)

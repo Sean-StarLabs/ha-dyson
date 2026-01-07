@@ -75,6 +75,14 @@ class DysonRobotCleanButton(DysonEntity, ButtonEntity):
     """Smart clean: selected areas if any, else full clean."""
 
     @property
+    def available(self) -> bool:
+        if bool(getattr(self._device, "has_fault", False)):
+            return False
+        # When a clean is running (or paused/returning), the Dyson app does not allow
+        # changing targets/strategy. Use the vacuum entity's pause/return-to-base controls.
+        return not bool(getattr(self._device, "is_clean_session_active", False))
+
+    @property
     def sub_name(self) -> Optional[str]:
         return "Clean"
 
@@ -94,6 +102,8 @@ class DysonRobotAddAreaButton(DysonEntity, ButtonEntity):
 
     @property
     def available(self) -> bool:
+        if bool(getattr(self._device, "is_config_locked", False)):
+            return False
         # Disable when the "All" option is selected (no cursor zone).
         zone_id = getattr(self._device, "selected_zone_id", None)
         if not isinstance(zone_id, str) or not zone_id:
@@ -116,6 +126,10 @@ class DysonRobotClearAreasButton(DysonEntity, ButtonEntity):
     """Clear the multi-area selection list."""
 
     _attr_entity_category = None
+
+    @property
+    def available(self) -> bool:
+        return not bool(getattr(self._device, "is_config_locked", False))
 
     @property
     def sub_name(self) -> Optional[str]:
