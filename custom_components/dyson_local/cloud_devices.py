@@ -412,6 +412,10 @@ class DysonCloudRobot(DysonCloudDevice):
     @property
     def is_docked(self) -> bool:
         """Best-effort: True when the robot is on the dock/charging."""
+        # Token-based overrides to avoid stale booleans and substring issues.
+        tokens = self._state_tokens()
+        if "DISCHARGING" in tokens:
+            return False
         # Most devices encode dock/charge state in the state string.
         if self._state_has_any_token("DOCKED", "DOCK", "CHARGING", "CHARGED"):
             return True

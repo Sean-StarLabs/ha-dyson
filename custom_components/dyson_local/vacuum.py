@@ -111,6 +111,8 @@ class DysonCloudVacuumEntity(DysonEntity, StateVacuumEntity):
             return VacuumActivity.ERROR
         if "PAUSED" in raw:
             return VacuumActivity.PAUSED
+        if "DISCHARGING" in tokens:
+            return VacuumActivity.IDLE
         # Some models report that they are charging during a clean (e.g. "FULL_CLEAN_CHARGING").
         # Treat it as paused/charging rather than docked/idle.
         if "CLEAN" in raw and "CHARG" in raw:
