@@ -36,10 +36,18 @@ _LOGGER = logging.getLogger(__name__)
 _FAULT_CODE_TO_SUMMARY: dict[str, str] = {
     # RB03 (360 Vis Nav) when dust bin is removed.
     "7.0-1": "Bin removed",
+    # RB03 (360 Vis Nav) when a filter is removed.
+    "1.5-1": "Filter removed",
+    "1.6-1": "Filter removed",
 }
 
 _BIN_ABSENT_FAULT_CODES: set[str] = {
     "7.0-1",
+}
+
+_FILTER_ABSENT_FAULT_CODES: set[str] = {
+    "1.5-1",
+    "1.6-1",
 }
 
 
@@ -479,6 +487,40 @@ class DysonCloudRobot(DysonCloudDevice):
         return True
 
     @property
+    def is_filter_present(self) -> bool:
+        # Fault-code override (most reliable when available).
+        if any(self._normalise_fault_code(code) in _FILTER_ABSENT_FAULT_CODES for code in self.fault_codes):
+            return False
+
+        present = self._status_bool(
+            "filterPresent",
+            "filterpresent",
+            "filterInstalled",
+            "filterinstalled",
+            "filterFitted",
+            "filterfitted",
+            "filterRemoved",
+            "filterremoved",
+        )
+        if present is not None:
+            return present
+
+        state = self._status_str("filterState", "filterstate")
+        if state:
+            s = state.upper()
+            if any(k in s for k in ("NOT_FITTED", "NOT_INSTALLED", "MISSING", "REMOVED", "ABSENT")):
+                return False
+            if any(k in s for k in ("FITTED", "INSTALLED", "PRESENT")):
+                return True
+
+        if self._fault_has("FILTER", "MISSING", "NOT_FITTED", "NOT INSTALLED", "REMOVED", "ABSENT"):
+            return False
+        if self._fault_has("FILTER", "FITTED", "INSTALLED", "PRESENT"):
+            return True
+
+        return True
+
+    @property
     def is_bin_full(self) -> bool:
         full = self._status_bool(
             "binFull",
@@ -517,7 +559,7 @@ class DysonCloudRobot(DysonCloudDevice):
                 return summary
         if not self.is_bin_present:
             return "Bin removed"
-        if self._fault_has("FILTER", "MISSING", "NOT INSTALLED", "REMOVED", "ABSENT"):
+        if not self.is_filter_present or self._fault_has("FILTER", "MISSING", "NOT INSTALLED", "REMOVED", "ABSENT"):
             return "Filter removed"
         if self.tilt:
             return "Robot tilted"
@@ -551,7 +593,7 @@ class DysonCloudRobot(DysonCloudDevice):
     @property
     def can_start(self) -> bool:
         # Dyson app blocks control when faults are present or bin is not fitted.
-        if self.has_fault or not self.is_bin_present:
+        if self.has_fault or not self.is_bin_present or not self.is_filter_present:
             return False
         # START is also used as RESUME when paused.
         if self.is_paused:
